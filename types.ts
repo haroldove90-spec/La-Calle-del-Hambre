@@ -35,6 +35,7 @@ export interface Coupon {
   descripcionDescuento: string;
   codigoQR: string; 
   fechaExpiracion: string; 
+  imagen_url?: string;
 }
 
 export interface Promotion {
