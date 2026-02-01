@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js';
+import { QRCodeSVG } from 'https://esm.sh/qrcode.react';
 import { Business, GeoPoint, BusinessCategory, Coupon } from './types';
 
 // CONFIGURACIÓN SUPABASE
@@ -21,17 +22,20 @@ const App: React.FC = () => {
   const [coupons, setCoupons] = useState<Coupon[]>([]);
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [userLocation, setUserLocation] = useState<GeoPoint>({ lat: 19.6468, lng: -99.2255 });
+  const [isGPSEnabled, setIsGPSEnabled] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(true);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
   
   // Estado para la vista de detalle
   const [selectedBusinessId, setSelectedBusinessId] = useState<string | null>(null);
+  const [activeCoupon, setActiveCoupon] = useState<Coupon | null>(null);
 
   // Formulario Registro Negocio
   const [bizFormData, setBizFormData] = useState<Partial<Business>>({
-    nombre: '', descripcion: '', categoria: 'Hamburguesas', coordenadas: { lat: 19.6366, lng: -99.2155 }, imagenMenu: ''
+    nombre: '', descripcion: '', categoria: 'Hamburguesas', coordenadas: { lat: 19.6366, lng: -99.2155 }, imagenMenu: '', telefono: ''
   });
+  const [imageFile, setImageFile] = useState<File | null>(null);
 
   const fetchAllData = async () => {
     setLoading(true);
@@ -48,7 +52,8 @@ const App: React.FC = () => {
         descripcion: b.descripcion, 
         coordenadas: { lat: b.lat, lng: b.lng }, 
         imagenMenu: b.imagen_menu || 'https://picsum.photos/400/600', 
-        categoria: b.categoria as BusinessCategory
+        categoria: b.categoria as BusinessCategory,
+        telefono: b.telefono
       })));
       setCoupons((cData || []).map(c => ({
         id: c.id, 
@@ -64,32 +69,82 @@ const App: React.FC = () => {
 
   useEffect(() => { fetchAllData(); }, []);
 
+  const activateRadar = () => {
+    if (!navigator.geolocation) {
+      setSaveStatus("Tu navegador no soporta GPS.");
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setUserLocation({
+          lat: position.coords.latitude,
+          lng: position.coords.longitude
+        });
+        setIsGPSEnabled(true);
+        setSaveStatus("¡Radar Activado! Mostrando locales cerca de ti.");
+        setTimeout(() => setSaveStatus(null), 3000);
+      },
+      (error) => {
+        setSaveStatus("Error de GPS: Permiso denegado.");
+        console.error(error);
+      }
+    );
+  };
+
   const handleSaveBusiness = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSaveStatus("Guardando en Supabase...");
+    setSaveStatus("Procesando registro...");
     
+    let publicImageUrl = bizFormData.imagenMenu || 'https://picsum.photos/400/600';
+
+    if (imageFile) {
+      setSaveStatus("Subiendo imagen al storage...");
+      const fileExt = imageFile.name.split('.').pop();
+      const fileName = `${Math.random()}.${fileExt}`;
+      const filePath = `menus/${fileName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from('menus')
+        .upload(filePath, imageFile);
+
+      if (uploadError) {
+        setSaveStatus("Error subiendo imagen: " + uploadError.message);
+        return;
+      }
+
+      const { data: publicUrlData } = supabase.storage
+        .from('menus')
+        .getPublicUrl(filePath);
+      
+      publicImageUrl = publicUrlData.publicUrl;
+    }
+
     const payload = {
       nombre: bizFormData.nombre,
       descripcion: bizFormData.descripcion,
       lat: bizFormData.coordenadas?.lat,
       lng: bizFormData.coordenadas?.lng,
       categoria: bizFormData.categoria,
-      imagen_menu: bizFormData.imagenMenu || 'https://picsum.photos/400/600'
+      imagen_menu: publicImageUrl,
+      telefono: bizFormData.telefono
     };
 
     const { error } = await supabase.from('negocios').insert([payload]);
 
     if (error) {
-      setSaveStatus("Error: " + error.message);
+      setSaveStatus("Error DB: " + error.message);
     } else {
-      setSaveStatus("¡Negocio registrado con éxito!");
+      setSaveStatus("¡Negocio registrado y menú publicado!");
       setBizFormData({ 
         nombre: '', 
         descripcion: '', 
         categoria: 'Hamburguesas', 
         coordenadas: { lat: 19.6366, lng: -99.2155 }, 
-        imagenMenu: '' 
+        imagenMenu: '',
+        telefono: ''
       });
+      setImageFile(null);
       await fetchAllData();
       setTimeout(() => setSaveStatus(null), 3000);
     }
@@ -105,19 +160,27 @@ const App: React.FC = () => {
   const nearbyMessage = useMemo(() => {
     if (nearbyCoupons.length > 0) {
       const biz = businesses.find(b => b.id === nearbyCoupons[0].idNegocio);
-      if (biz?.nombre.includes('Tapatío')) return '¡Estás en la Calle del Hambre! Pasa por tus tacos al Tapatío';
       return `¡Estás cerca! ${biz?.nombre} tiene una promo para ti.`;
     }
     return '';
   }, [nearbyCoupons, businesses]);
 
-  const filteredBusinesses = useMemo(() => {
+  const sortedBusinesses = useMemo(() => {
     const lowerSearch = searchTerm.toLowerCase();
-    return businesses.filter(b => 
+    const filtered = businesses.filter(b => 
       b.nombre.toLowerCase().includes(lowerSearch) || 
       b.categoria.toLowerCase().includes(lowerSearch)
     );
-  }, [businesses, searchTerm]);
+
+    if (isGPSEnabled) {
+      return [...filtered].sort((a, b) => {
+        const distA = calculateDistance(userLocation.lat, userLocation.lng, a.coordenadas.lat, a.coordenadas.lng);
+        const distB = calculateDistance(userLocation.lat, userLocation.lng, b.coordenadas.lat, b.coordenadas.lng);
+        return distA - distB;
+      });
+    }
+    return filtered;
+  }, [businesses, searchTerm, isGPSEnabled, userLocation]);
 
   const selectedBusiness = useMemo(() => 
     businesses.find(b => b.id === selectedBusinessId), 
@@ -130,11 +193,10 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col font-sans relative overflow-x-hidden">
       
-      {/* NOTIFICACIÓN GEOFENCING */}
       {nearbyMessage && (
         <div className="fixed top-4 md:top-24 left-1/2 -translate-x-1/2 z-[100] w-[92%] max-w-sm animate-bounceIn">
           <div className="bg-white border-l-4 border-orange-500 rounded-2xl shadow-2xl p-5 flex items-start gap-4 ring-1 ring-black/10">
-            <div className="bg-orange-100 p-2.5 rounded-full text-orange-600 text-2xl flex-shrink-0">🌮</div>
+            <div className="bg-orange-100 p-2.5 rounded-full text-orange-600 text-2xl flex-shrink-0">📍</div>
             <div className="flex-1">
               <h4 className="font-black text-gray-900 text-[13px] italic uppercase tracking-tight">{nearbyMessage}</h4>
               <button onClick={() => { setActiveTab('cupones'); setSelectedBusinessId(nearbyCoupons[0].idNegocio); }} className="mt-3 text-[10px] font-black text-white bg-black px-5 py-2.5 rounded-full hover:bg-orange-600 transition-all uppercase">Ir al Local</button>
@@ -143,7 +205,6 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* HEADER */}
       <header className="bg-black text-white p-6 flex flex-col md:flex-row items-center justify-between border-b-4 border-orange-600 gap-4">
         <div className="flex items-center gap-4">
           <span className="text-4xl">🍔</span>
@@ -152,10 +213,11 @@ const App: React.FC = () => {
             <p className="text-[10px] font-bold opacity-70 tracking-[0.2em] uppercase mt-1">Directorio Real-Time</p>
           </div>
         </div>
-        <div className="bg-orange-600 px-5 py-2 rounded-full text-[10px] font-black italic shadow-lg uppercase animate-pulse tracking-widest">📍 IZCALLI CORE</div>
+        <div className="bg-orange-600 px-5 py-2 rounded-full text-[10px] font-black italic shadow-lg uppercase animate-pulse tracking-widest">
+           {isGPSEnabled ? "📡 RADAR ON" : "📍 IZCALLI CORE"}
+        </div>
       </header>
 
-      {/* NAVEGACIÓN DESLIZABLE - SOLUCIÓN DEFINITIVA */}
       <nav className="bg-white border-b sticky top-0 z-[80] shadow-md w-full">
         <div className="nav-scroll-container">
           {[
@@ -167,7 +229,7 @@ const App: React.FC = () => {
           ].map((tab) => (
             <button
               key={tab.id}
-              onClick={() => { setActiveTab(tab.id as any); setSelectedBusinessId(null); }}
+              onClick={() => { setActiveTab(tab.id as any); setSelectedBusinessId(null); setActiveCoupon(null); }}
               className={`nav-tab-button ${activeTab === tab.id ? 'active' : ''}`}
             >
               {tab.label}
@@ -181,28 +243,6 @@ const App: React.FC = () => {
         
         {!loading && (
           <div className="animate-fadeIn">
-            {activeTab === 'schema' && (
-              <div className="space-y-6">
-                <div className="bg-white p-6 rounded-3xl border shadow-xl flex flex-col md:flex-row justify-between items-center gap-6">
-                  <div>
-                    <h2 className="font-black text-gray-800 italic uppercase">Estado de la Nube</h2>
-                    <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">Sincronizado con PostgREST</p>
-                  </div>
-                  <button onClick={fetchAllData} className="w-full md:w-auto bg-black text-white px-8 py-4 rounded-2xl font-black text-[12px] uppercase shadow-xl hover:bg-orange-600 transition-all">REFRESCAR AHORA 🔄</button>
-                </div>
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                  <div className="bg-gray-900 p-6 rounded-[35px] shadow-2xl overflow-hidden border-2 border-black">
-                    <span className="text-xs font-black text-orange-500 uppercase italic mb-4 block">Tabla: negocios</span>
-                    <pre className="text-green-400 text-[10px] font-mono h-[300px] overflow-auto no-scrollbar">{JSON.stringify(businesses, null, 2)}</pre>
-                  </div>
-                  <div className="bg-gray-900 p-6 rounded-[35px] shadow-2xl overflow-hidden border-2 border-black">
-                    <span className="text-xs font-black text-blue-500 uppercase italic mb-4 block">Tabla: cupones</span>
-                    <pre className="text-blue-300 text-[10px] font-mono h-[300px] overflow-auto no-scrollbar">{JSON.stringify(coupons, null, 2)}</pre>
-                  </div>
-                </div>
-              </div>
-            )}
-
             {activeTab === 'registro' && (
               <div className="max-w-3xl mx-auto">
                 <div className="bg-white p-8 md:p-14 rounded-[50px] shadow-2xl border border-gray-100">
@@ -221,21 +261,21 @@ const App: React.FC = () => {
                         </select>
                       </label>
                     </div>
-                    <label className="block">
-                      <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-2">Descripción Corta</span>
-                      <textarea placeholder="Ej: Las mejores arepas rellenas de la zona..." value={bizFormData.descripcion} onChange={(e) => setBizFormData(p => ({...p, descripcion: e.target.value}))} className="form-input h-32 resize-none" required/>
-                    </label>
-                    <div className="grid grid-cols-2 gap-6 p-6 bg-gray-50 rounded-[30px] border-2 border-dashed border-gray-200">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       <label className="block">
-                        <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-2">Latitud</span>
-                        <input type="number" step="0.000001" value={bizFormData.coordenadas?.lat} onChange={(e) => setBizFormData(p => ({...p, coordenadas: {...p.coordenadas!, lat: parseFloat(e.target.value)}}))} className="form-input !bg-white"/>
+                        <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-2">Teléfono de pedidos (WhatsApp)</span>
+                        <input name="telefono" placeholder="Ej: +521234567890" value={bizFormData.telefono} onChange={(e) => setBizFormData(p => ({...p, telefono: e.target.value}))} className="form-input" />
                       </label>
                       <label className="block">
-                        <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-2">Longitud</span>
-                        <input type="number" step="0.000001" value={bizFormData.coordenadas?.lng} onChange={(e) => setBizFormData(p => ({...p, coordenadas: {...p.coordenadas!, lng: parseFloat(e.target.value)}}))} className="form-input !bg-white"/>
+                        <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-2">Subir Menú (Imagen)</span>
+                        <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] || null)} className="form-input !py-3"/>
                       </label>
                     </div>
-                    <button type="submit" className="w-full bg-black text-white py-6 rounded-[30px] font-black uppercase italic text-xl shadow-2xl hover:bg-orange-600 transition-all transform active:scale-95 tracking-tighter">
+                    <label className="block">
+                      <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-2">Descripción Corta</span>
+                      <textarea placeholder="Ej: Las mejores arepas rellenas..." value={bizFormData.descripcion} onChange={(e) => setBizFormData(p => ({...p, descripcion: e.target.value}))} className="form-input h-32 resize-none" required/>
+                    </label>
+                    <button type="submit" className="w-full bg-black text-white py-6 rounded-[30px] font-black uppercase italic text-xl shadow-2xl hover:bg-orange-600 transition-all transform active:scale-95">
                       GUARDAR NEGOCIO 🚀
                     </button>
                   </form>
@@ -246,12 +286,16 @@ const App: React.FC = () => {
             {activeTab === 'cupones' && (
               <div className="space-y-10">
                 {selectedBusinessId === null ? (
-                  /* VISTA 1: DIRECTORIO DE NEGOCIOS */
                   <div className="animate-fadeIn">
                     <div className="bg-black p-12 md:p-20 rounded-[60px] shadow-2xl border-b-[15px] border-orange-600 flex flex-col md:flex-row justify-between items-center gap-10">
                       <div className="text-center md:text-left">
                         <h2 className="text-5xl font-black text-orange-500 italic uppercase tracking-tighter leading-none">La Calle</h2>
-                        <p className="text-white/40 font-black uppercase text-xs tracking-[0.4em] mt-3">Directorio de Sabores en Izcalli</p>
+                        <button 
+                          onClick={activateRadar}
+                          className="mt-6 bg-white text-black font-black px-8 py-3 rounded-full uppercase italic text-[12px] hover:bg-orange-500 hover:text-white transition-all shadow-xl flex items-center gap-2 mx-auto md:mx-0"
+                        >
+                          📡 Activar Radar de Hambre
+                        </button>
                       </div>
                       <div className="relative w-full max-w-md">
                         <span className="absolute left-6 top-1/2 -translate-y-1/2 text-2xl pointer-events-none opacity-50">🔍</span>
@@ -259,30 +303,15 @@ const App: React.FC = () => {
                           placeholder="Busca local o comida..." 
                           value={searchTerm} 
                           onChange={(e) => setSearchTerm(e.target.value)} 
-                          className="w-full pl-16 pr-8 py-5 bg-[#F0F0F0] rounded-full font-black text-lg outline-none shadow-inner text-black placeholder:text-gray-400"
+                          className="w-full pl-16 pr-8 py-5 bg-[#F0F0F0] rounded-full font-black text-lg outline-none shadow-inner"
                         />
                       </div>
                     </div>
 
-                    {businesses.length === 0 ? (
-                      /* ESTADO VACÍO SOLICITADO */
-                      <div className="mt-16 flex flex-col items-center justify-center p-12 bg-white border-2 border-dashed border-gray-200 rounded-[50px] shadow-inner text-center space-y-8 animate-fadeIn">
-                        <span className="text-7xl grayscale opacity-20">🏪</span>
-                        <div className="space-y-2">
-                          <h3 className="text-2xl font-black italic uppercase text-gray-800">No hay locales registrados aún</h3>
-                          <p className="text-gray-400 font-bold text-sm uppercase">Sé el pionero en la Calle del Hambre</p>
-                        </div>
-                        <button 
-                          onClick={() => setActiveTab('registro')}
-                          className="bg-orange-600 text-white font-black px-12 py-6 rounded-[30px] text-xl uppercase italic shadow-2xl hover:bg-black transition-all active:scale-95"
-                        >
-                          + Registrar el primer local de la Calle del Hambre
-                        </button>
-                      </div>
-                    ) : (
-                      /* LISTADO DE NEGOCIOS */
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 mt-12">
-                        {filteredBusinesses.map(b => (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 mt-12">
+                      {sortedBusinesses.map(b => {
+                        const dist = calculateDistance(userLocation.lat, userLocation.lng, b.coordenadas.lat, b.coordenadas.lng);
+                        return (
                           <div 
                             key={b.id} 
                             onClick={() => setSelectedBusinessId(b.id)}
@@ -293,39 +322,44 @@ const App: React.FC = () => {
                               <div className="absolute top-4 left-4 bg-black text-orange-500 text-[9px] font-black px-4 py-1.5 rounded-full uppercase italic shadow-2xl">
                                 {b.categoria}
                               </div>
+                              <div className="absolute bottom-4 right-4 bg-orange-600 text-white text-[9px] font-black px-4 py-1.5 rounded-full uppercase italic shadow-lg">
+                                {isGPSEnabled ? `A ${(dist * 1000).toFixed(0)}m de ti` : 'Izcalli Center'}
+                              </div>
                             </div>
                             <div className="p-8 flex-1 flex flex-col justify-between">
-                              <div>
+                              <div className="mb-4">
                                 <h4 className="text-2xl font-black text-black italic uppercase leading-tight mb-2 truncate">{b.nombre}</h4>
-                                <p className="text-gray-400 text-xs font-bold line-clamp-2 h-8">{b.descripcion}</p>
+                                <p className="text-gray-400 text-xs font-bold line-clamp-2">{b.descripcion}</p>
                               </div>
-                              <div className="mt-6 flex justify-between items-center border-t pt-4">
-                                <span className="text-[10px] font-black text-orange-600 uppercase italic">Ver Perfil ➔</span>
-                                <div className="bg-orange-100 text-orange-600 font-black px-3 py-1 rounded-full text-[10px]">
-                                  {coupons.filter(c => c.idNegocio === b.id).length} Promos
-                                </div>
-                              </div>
+                              
+                              {b.telefono && (
+                                <a 
+                                  href={`https://wa.me/${b.telefono.replace(/\+/g, '').replace(/\s/g, '')}?text=${encodeURIComponent('Hola, vi tu promoción en la app Calle del Hambre y me gustaría hacer un pedido.')}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="mt-2 flex items-center justify-center gap-2 bg-[#25D366] text-white py-4 rounded-2xl font-black text-[11px] uppercase italic shadow-lg hover:brightness-110 transition-all w-full"
+                                >
+                                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg>
+                                  Pedir por WhatsApp
+                                </a>
+                              )}
                             </div>
                           </div>
-                        ))}
-                      </div>
-                    )}
+                        );
+                      })}
+                    </div>
                   </div>
                 ) : (
-                  /* VISTA 2: PERFIL DE NEGOCIO (DETALLE) */
                   <div className="animate-fadeIn space-y-8">
-                    <button 
-                      onClick={() => setSelectedBusinessId(null)}
-                      className="group flex items-center gap-3 bg-white px-8 py-4 rounded-full shadow-lg border border-gray-100 font-black text-[11px] uppercase italic text-black hover:bg-black hover:text-white transition-all transform active:scale-95"
-                    >
-                      <span className="group-hover:-translate-x-1 transition-transform">⬅</span> VOLVER AL LISTADO
+                    <button onClick={() => { setSelectedBusinessId(null); setActiveCoupon(null); }} className="group flex items-center gap-3 bg-white px-8 py-4 rounded-full shadow-lg border border-gray-100 font-black text-[11px] uppercase italic text-black hover:bg-black hover:text-white transition-all">
+                      ⬅ VOLVER AL LISTADO
                     </button>
 
                     <div className="bg-white rounded-[60px] shadow-2xl border border-gray-50 overflow-hidden flex flex-col lg:flex-row">
                       <div className="lg:w-1/2 h-[350px] lg:h-auto bg-gray-200 relative">
                         <img src={selectedBusiness?.imagenMenu} className="w-full h-full object-cover" alt={selectedBusiness?.nombre}/>
                         <div className="absolute inset-0 bg-gradient-to-t from-black/90 to-transparent flex flex-col justify-end p-12 text-white">
-                          <span className="bg-orange-600 text-[11px] font-black px-6 py-2 rounded-full uppercase italic w-fit mb-4 shadow-xl">Menú Oficial</span>
                           <h2 className="text-5xl font-black italic uppercase leading-none mb-4">{selectedBusiness?.nombre}</h2>
                           <p className="text-white/60 font-bold text-sm max-w-md">{selectedBusiness?.descripcion}</p>
                         </div>
@@ -333,40 +367,52 @@ const App: React.FC = () => {
                       
                       <div className="lg:w-1/2 p-10 md:p-16 flex flex-col justify-center space-y-12 bg-white">
                         <div className="space-y-6">
-                          <h3 className="text-xs font-black text-orange-600 uppercase tracking-[0.4em] italic mb-8">Ofertas Activas</h3>
+                          <h3 className="text-xs font-black text-orange-600 uppercase tracking-[0.4em] italic mb-8">Ofertas Disponibles</h3>
                           <div className="space-y-6">
-                            {businessCoupons.length === 0 && (
-                              <div className="p-8 bg-gray-50 rounded-[30px] border-2 border-dashed border-gray-200 text-center">
-                                <p className="text-gray-400 font-bold italic uppercase text-[10px]">Sin promociones activas por ahora</p>
-                              </div>
-                            )}
                             {businessCoupons.map(c => (
-                              <div key={c.id} className="bg-black text-white p-8 rounded-[40px] flex flex-col sm:flex-row items-center justify-between gap-6 shadow-2xl relative overflow-hidden group">
-                                <div className="absolute -right-4 -top-4 text-white/5 text-8xl font-black italic select-none">HOT</div>
-                                <div className="relative z-10 text-center sm:text-left">
-                                  <span className="text-[9px] font-black text-orange-500 uppercase tracking-widest block mb-2">Vence: {new Date(c.fechaExpiracion).toLocaleDateString()}</span>
-                                  <h4 className="text-2xl font-black italic uppercase leading-none">{c.descripcionDescuento}</h4>
+                              <div key={c.id} className="bg-black text-white p-8 rounded-[40px] flex flex-col items-center gap-6 shadow-2xl relative overflow-hidden group">
+                                <div className="text-center w-full flex flex-col sm:flex-row justify-between items-center gap-4">
+                                  <div className="text-center sm:text-left">
+                                    <span className="text-[9px] font-black text-orange-500 uppercase tracking-widest block mb-2">Promo Activa</span>
+                                    <h4 className="text-2xl font-black italic uppercase leading-none">{c.descripcionDescuento}</h4>
+                                  </div>
+                                  {!activeCoupon || activeCoupon.id !== c.id ? (
+                                    <button 
+                                      onClick={() => setActiveCoupon(c)}
+                                      className="bg-orange-600 text-white font-black px-8 py-4 rounded-[25px] text-[11px] uppercase shadow-xl hover:bg-white hover:text-orange-600 transition-all"
+                                    >
+                                      OBTENER CUPÓN
+                                    </button>
+                                  ) : (
+                                    <div className="bg-white p-4 rounded-3xl animate-fadeIn">
+                                      <QRCodeSVG value={`${c.idNegocio}-${c.id}-${new Date().getTime()}`} size={120} />
+                                    </div>
+                                  )}
                                 </div>
-                                <button className="relative z-10 bg-orange-600 text-white font-black px-10 py-5 rounded-[25px] text-[12px] uppercase shadow-xl hover:bg-white hover:text-orange-600 transition-all active:scale-95">CANJEAR</button>
+                                {activeCoupon?.id === c.id && (
+                                  <div className="w-full text-center border-t border-white/10 pt-4 space-y-2">
+                                    <p className="text-[10px] font-black uppercase text-orange-500 italic">Muestra este código en caja para aplicar tu descuento</p>
+                                    <p className="text-[8px] text-white/30 font-mono">CODE: {c.codigoQR}-{new Date().getFullYear()}</p>
+                                  </div>
+                                )}
                               </div>
                             ))}
                           </div>
                         </div>
 
-                        <div className="pt-10 border-t border-gray-100 flex flex-col sm:flex-row items-center justify-between gap-6">
-                          <div className="text-center sm:text-left">
-                            <span className="text-[10px] text-gray-400 font-bold uppercase block mb-1">Localizado en</span>
-                            <span className="text-sm font-black text-gray-800 uppercase italic">Izcalli, Cumbria</span>
+                        {selectedBusiness?.telefono && (
+                          <div className="pt-8 border-t border-gray-100">
+                             <a 
+                                href={`https://wa.me/${selectedBusiness.telefono.replace(/\+/g, '').replace(/\s/g, '')}?text=${encodeURIComponent('Hola, vi tu promoción en la app Calle del Hambre y me gustaría hacer un pedido.')}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center justify-center gap-3 bg-[#25D366] text-white py-5 rounded-[30px] font-black uppercase italic text-[12px] shadow-xl hover:brightness-110 transition-all w-full"
+                              >
+                                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg>
+                                Pedir por WhatsApp Directo
+                              </a>
                           </div>
-                          <a 
-                            href={`https://www.google.com/maps/search/?api=1&query=${selectedBusiness?.coordenadas.lat},${selectedBusiness?.coordenadas.lng}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="w-full sm:w-auto bg-black text-white py-5 px-10 rounded-[30px] font-black uppercase italic text-[12px] shadow-xl text-center hover:bg-orange-600 transition-all flex items-center justify-center gap-3 tracking-tighter"
-                          >
-                            📍 CÓMO LLEGAR AL LOCAL
-                          </a>
-                        </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -374,44 +420,26 @@ const App: React.FC = () => {
               </div>
             )}
 
-            {/* OTRAS PESTAÑAS SIMULADAS */}
+            {/* OTRAS PESTAÑAS */}
             {activeTab === 'geofencing' && (
-              <div className="max-w-4xl mx-auto bg-white p-10 rounded-[50px] shadow-2xl border border-gray-100 space-y-10">
-                <h2 className="text-3xl font-black italic uppercase text-black">Simulador GPS Cumbria</h2>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
-                  <div className="bg-[#F0F0F0] p-8 rounded-[40px] space-y-6 shadow-inner">
-                    <label className="block">
-                      <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-2">Latitud</span>
-                      <input type="number" step="0.0001" value={userLocation.lat} onChange={(e) => setUserLocation(p => ({...p, lat: parseFloat(e.target.value)}))} className="form-input !bg-white"/>
-                    </label>
-                    <label className="block">
-                      <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-2">Longitud</span>
-                      <input type="number" step="0.0001" value={userLocation.lng} onChange={(e) => setUserLocation(p => ({...p, lng: parseFloat(e.target.value)}))} className="form-input !bg-white"/>
-                    </label>
-                  </div>
-                  <div className="space-y-4">
-                    {businesses.length === 0 && <p className="text-center text-gray-400 italic">No hay locales para rastrear</p>}
-                    {businesses.map(b => {
-                      const d = calculateDistance(userLocation.lat, userLocation.lng, b.coordenadas.lat, b.coordenadas.lng);
-                      return (
-                        <div key={b.id} className={`p-6 rounded-[30px] border-2 flex justify-between items-center transition-all ${d <= 2 ? 'bg-orange-50 border-orange-500 shadow-lg' : 'bg-white border-gray-100 opacity-40'}`}>
-                          <span className="font-black uppercase text-xs italic">{b.nombre}</span>
-                          <span className="font-mono font-black text-orange-600">{d.toFixed(2)} km</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
+              <div className="max-w-4xl mx-auto bg-white p-10 rounded-[50px] shadow-2xl border border-gray-100 text-center">
+                 <h2 className="text-3xl font-black italic uppercase mb-8">Mapa de Antojos</h2>
+                 <p className="text-gray-400 font-bold uppercase mb-12">Simulación de Geofencing en Izcalli</p>
+                 <div className="p-12 bg-gray-50 rounded-[40px] border-4 border-dashed border-gray-200">
+                    <span className="text-5xl opacity-30">📍</span>
+                    <p className="mt-6 text-gray-400 font-black italic uppercase text-xs">Ubicación Actual: {userLocation.lat.toFixed(4)}, {userLocation.lng.toFixed(4)}</p>
+                 </div>
               </div>
             )}
-            
+
             {activeTab === 'admin_cupones' && (
-               <div className="max-w-3xl mx-auto bg-white p-12 rounded-[50px] shadow-2xl border border-gray-100 text-center space-y-8">
-                  <span className="text-7xl">🔥</span>
-                  <h2 className="text-3xl font-black italic uppercase">Mis Cupones (Admin)</h2>
-                  <p className="text-gray-400 font-bold uppercase">Gestión avanzada de promociones Cloud Supabase</p>
-                  <div className="p-8 bg-gray-50 border-2 border-dashed border-gray-200 rounded-[30px]">
-                    <p className="text-orange-600 font-black italic uppercase text-xs">Próximamente: Panel de analíticas de canje</p>
+               <div className="max-w-3xl mx-auto bg-white p-12 rounded-[50px] shadow-2xl text-center space-y-8">
+                  <span className="text-7xl">📊</span>
+                  <h2 className="text-3xl font-black italic uppercase">Panel de Control</h2>
+                  <p className="text-gray-400 font-bold uppercase">Gestión de impacto y conversiones reales</p>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="p-6 bg-orange-50 rounded-3xl"><h5 className="font-black text-2xl">{coupons.length}</h5><p className="text-[9px] font-bold uppercase text-orange-600">Cupones Activos</p></div>
+                    <div className="p-6 bg-gray-50 rounded-3xl"><h5 className="font-black text-2xl">{businesses.length}</h5><p className="text-[9px] font-bold uppercase text-gray-400">Locales Aliados</p></div>
                   </div>
                </div>
             )}
@@ -420,13 +448,10 @@ const App: React.FC = () => {
       </main>
 
       <footer className="bg-black text-white p-16 md:p-24 text-center border-t-[12px] border-orange-600">
-        <div className="flex justify-center gap-12 text-5xl filter grayscale opacity-20 mb-12">
-           <span>🍕</span><span>🍔</span><span>🌮</span><span>🌭</span><span>🍩</span>
-        </div>
-        <div className="text-[14px] md:text-[18px] font-black uppercase tracking-[0.5em] text-orange-500 italic leading-relaxed px-4">
+        <div className="text-[14px] md:text-[18px] font-black uppercase tracking-[0.5em] text-orange-500 italic">
            📍 La Calle del Hambre - Izcalli Engine
         </div>
-        <p className="text-[10px] text-white/20 mt-8 font-black uppercase tracking-widest italic">CONNECTED CLOUD: {SUPABASE_URL}</p>
+        <p className="text-[10px] text-white/20 mt-8 font-black uppercase tracking-widest italic">Vercel Deployment v2.5 - Supabase Cloud Storage</p>
       </footer>
 
       <style dangerouslySetInnerHTML={{ __html: `
@@ -435,7 +460,6 @@ const App: React.FC = () => {
         .animate-fadeIn { animation: fadeIn 0.5s ease-out forwards; }
         .animate-bounceIn { animation: bounceIn 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
         .no-scrollbar::-webkit-scrollbar { display: none; }
-        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         
         .form-input { 
           background-color: #F0F0F0 !important; 
@@ -445,47 +469,22 @@ const App: React.FC = () => {
           border-radius: 20px;
           font-weight: 700;
           outline: none;
-          transition: all 0.3s ease;
         }
-        .form-input:focus { 
-          border-color: #ea580c !important; 
-          background-color: #fff !important; 
-          box-shadow: 0 10px 30px -10px rgba(234, 88, 12, 0.2);
-        }
+        .form-input:focus { border-color: #ea580c !important; background-color: #fff !important; }
 
-        /* SOLUCIÓN DEFINITIVA NAVEGACIÓN SOLICITADA */
         .nav-scroll-container {
           display: flex !important;
           flex-wrap: nowrap !important;
           overflow-x: auto !important;
           -webkit-overflow-scrolling: touch;
           gap: 15px;
-          padding-bottom: 5px;
-          padding-left: 15px;
-          padding-right: 15px;
+          padding: 5px 15px;
           scrollbar-width: none;
         }
-        .nav-scroll-container::-webkit-scrollbar {
-          display: none;
-        }
-
         .nav-tab-button {
-          flex-shrink: 0;
-          padding: 20px 25px;
-          text-transform: uppercase;
-          font-weight: 900;
-          font-size: 11px;
-          color: #9ca3af;
-          border-bottom: 4px solid transparent;
-          transition: all 0.3s ease;
-          letter-spacing: 0.15em;
-          white-space: nowrap;
+          flex-shrink: 0; padding: 20px 25px; text-transform: uppercase; font-weight: 900; font-size: 11px; color: #9ca3af; border-bottom: 4px solid transparent; transition: all 0.3s ease; white-space: nowrap;
         }
-        
-        .nav-tab-button.active {
-          color: #ea580c !important;
-          border-bottom-color: #ea580c !important;
-        }
+        .nav-tab-button.active { color: #ea580c !important; border-bottom-color: #ea580c !important; }
       `}} />
     </div>
   );

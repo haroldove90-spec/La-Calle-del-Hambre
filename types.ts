@@ -13,6 +13,7 @@ export interface Business {
   coordenadas: GeoPoint;
   imagenMenu: string;
   categoria: BusinessCategory;
+  telefono?: string; // Nuevo campo para WhatsApp
 }
 
 export interface Coupon {
