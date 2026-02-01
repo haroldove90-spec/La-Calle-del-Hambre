@@ -20,6 +20,15 @@ export interface Business {
   owner_id?: string;      // ID del usuario dueño (Patrocinador)
 }
 
+export interface Product {
+  id?: string;
+  id_negocio: string;
+  nombre: string;
+  precio: number;
+  descripcion: string;
+  categoria?: string;
+}
+
 export interface Coupon {
   id: string;
   idNegocio: string;

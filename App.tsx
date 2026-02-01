@@ -2,7 +2,8 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js';
 import { QRCodeSVG } from 'https://esm.sh/qrcode.react';
-import { Business, GeoPoint, BusinessCategory, Coupon, UserRole, Promotion } from './types.ts';
+import { GoogleGenAI, Type } from "@google/genai";
+import { Business, GeoPoint, BusinessCategory, Coupon, UserRole, Promotion, Product } from './types.ts';
 
 // Declaración para Leaflet (L está en el window)
 declare const L: any;
@@ -43,6 +44,7 @@ const App: React.FC = () => {
   const [coupons, setCoupons] = useState<Coupon[]>([]);
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [promotions, setPromotions] = useState<Promotion[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
   const [metrics, setMetrics] = useState<{whatsapp: number, maps: number, views: number}>({ whatsapp: 0, maps: 0, views: 0 });
   const [userLocation, setUserLocation] = useState<GeoPoint>(DEFAULT_LOCATION);
   const [isGPSEnabled, setIsGPSEnabled] = useState(false);
@@ -53,6 +55,8 @@ const App: React.FC = () => {
   const [activeCoupon, setActiveCoupon] = useState<Coupon | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [showPromoManager, setShowPromoManager] = useState(false);
+  const [showMenuManager, setShowMenuManager] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
   
   // --- ESTADO DE NOTIFICACIÓN RADAR ---
   const [activePromoNotif, setActivePromoNotif] = useState<{promo: Promotion, biz: Business} | null>(null);
@@ -64,6 +68,10 @@ const App: React.FC = () => {
 
   const [promoFormData, setPromoFormData] = useState<Partial<Promotion>>({
     mensaje: '¡Pasa por tu descuento!', radio_km: 2, frecuencia_horas: 4, activa: true, imagen_url: ''
+  });
+
+  const [productFormData, setProductFormData] = useState<Partial<Product>>({
+    nombre: '', precio: 0, descripcion: '', categoria: 'General'
   });
   
   const mapRef = useRef<any>(null);
@@ -91,10 +99,11 @@ const App: React.FC = () => {
   const fetchAllData = async () => {
     setIsSyncing(true);
     try {
-      const [bRes, cRes, pRes] = await Promise.all([
+      const [bRes, cRes, pRes, prRes] = await Promise.all([
         supabase.from('negocios').select('*'),
         supabase.from('cupones').select('*'),
-        supabase.from('promociones').select('*')
+        supabase.from('promociones').select('*'),
+        supabase.from('productos').select('*')
       ]);
       
       const parsedBiz = (bRes.data || []).map(b => ({
@@ -112,6 +121,7 @@ const App: React.FC = () => {
 
       setBusinesses(parsedBiz);
       setPromotions(pRes.data || []);
+      setProducts(prRes.data || []);
       setCoupons((cRes.data || []).map(c => ({
         id: c.id, 
         idNegocio: c.id_negocio, 
@@ -121,7 +131,7 @@ const App: React.FC = () => {
       })));
 
       if (userRole === 'PATROCINADOR' && parsedBiz.length > 0) {
-        const myId = parsedBiz[0].id; // Asumimos el primero para el MVP del dashboard
+        const myId = parsedBiz[0].id;
         setBizFormData(parsedBiz[0]);
         const { data: mData } = await supabase.from('metricas').select('tipo_evento').eq('id_negocio', myId);
         if (mData) {
@@ -214,6 +224,96 @@ const App: React.FC = () => {
       setTimeout(() => setSaveStatus(null), 3000);
     } catch (err: any) {
       setSaveStatus("Error: " + err.message);
+    } finally { setIsSyncing(false); }
+  };
+
+  const handleSaveProduct = async (e?: React.FormEvent, data?: Partial<Product>) => {
+    if (e) e.preventDefault();
+    const targetData = data || productFormData;
+    if (!bizFormData.id || !targetData.nombre) return;
+    
+    setIsSyncing(true);
+    try {
+      const { error } = await supabase.from('productos').insert([{
+        id_negocio: bizFormData.id,
+        nombre: targetData.nombre,
+        precio: targetData.precio,
+        descripcion: targetData.descripcion,
+        categoria: targetData.categoria
+      }]);
+      if (error) throw error;
+      if (!data) setProductFormData({ nombre: '', precio: 0, descripcion: '', categoria: 'General' });
+      await fetchAllData();
+    } catch (err) {
+      console.error("Error saving product:", err);
+    } finally { setIsSyncing(false); }
+  };
+
+  const handleIAScan = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !bizFormData.id) return;
+
+    setIsScanning(true);
+    try {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = async () => {
+        const base64Data = (reader.result as string).split(',')[1];
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        
+        const response = await ai.models.generateContent({
+          model: 'gemini-3-flash-preview',
+          contents: {
+            parts: [
+              { inlineData: { data: base64Data, mimeType: file.type } },
+              { text: "Analiza esta imagen o PDF de un menú y extrae todos los platillos. Devuelve un JSON con una lista de objetos que tengan: nombre_platillo, precio (solo el número), y descripcion." }
+            ]
+          },
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  nombre_platillo: { type: Type.STRING },
+                  precio: { type: Type.NUMBER },
+                  descripcion: { type: Type.STRING }
+                },
+                required: ["nombre_platillo", "precio"]
+              }
+            }
+          }
+        });
+
+        const results = JSON.parse(response.text || "[]");
+        for (const item of results) {
+          await handleSaveProduct(undefined, {
+            nombre: item.nombre_platillo,
+            precio: item.precio,
+            descripcion: item.descripcion,
+            categoria: "Escaneado con IA"
+          });
+        }
+        alert(`¡IA Scanner finalizado! Se han importado ${results.length} platillos.`);
+      };
+    } catch (err) {
+      console.error("Error IA Scan:", err);
+      alert("Hubo un error al procesar el menú con IA.");
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const handleDeleteProduct = async (id: string) => {
+    if (!confirm("¿Eliminar este platillo?")) return;
+    setIsSyncing(true);
+    try {
+      const { error } = await supabase.from('productos').delete().eq('id', id);
+      if (error) throw error;
+      await fetchAllData();
+    } catch (err) {
+      console.error("Error delete product:", err);
     } finally { setIsSyncing(false); }
   };
 
@@ -352,25 +452,6 @@ const App: React.FC = () => {
 
   const selectedBusiness = useMemo(() => businesses.find(b => b.id === selectedBusinessId), [businesses, selectedBusinessId]);
 
-  const handleGoToPromo = () => {
-    if (activePromoNotif) {
-      const biz = activePromoNotif.biz;
-      setActiveTab('geofencing');
-      setActivePromoNotif(null);
-      setTimeout(() => { if (mapRef.current) mapRef.current.setView([biz.coordenadas.lat, biz.coordenadas.lng], 18); }, 400);
-    }
-  };
-
-  const probarNotificacion = () => {
-    if (businesses.length > 0) {
-      if (audioRef.current) audioRef.current.play().catch(() => {});
-      setActivePromoNotif({
-        promo: { id: 'test', id_negocio: businesses[0].id, radio_km: 2, mensaje: '¡ESTO ES UNA PRUEBA! 🍔🔥', frecuencia_horas: 1, activa: true },
-        biz: businesses[0]
-      });
-    }
-  };
-
   if (!userRole) {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center p-6">
@@ -407,7 +488,12 @@ const App: React.FC = () => {
                  </div>
               </div>
               <div className="px-6 pb-6">
-                 <button onClick={handleGoToPromo} className="w-full bg-orange-600 text-white py-4 rounded-2xl flex items-center justify-center gap-2 font-black uppercase italic text-sm shadow-xl hover:bg-orange-700 transition-all">🚀 ¡Ir ahora!</button>
+                 <button onClick={() => {
+                   const biz = activePromoNotif.biz;
+                   setActiveTab('geofencing');
+                   setActivePromoNotif(null);
+                   setTimeout(() => { if (mapRef.current) mapRef.current.setView([biz.coordenadas.lat, biz.coordenadas.lng], 18); }, 400);
+                 }} className="w-full bg-orange-600 text-white py-4 rounded-2xl flex items-center justify-center gap-2 font-black uppercase italic text-sm shadow-xl hover:bg-orange-700 transition-all">🚀 ¡Ir ahora!</button>
               </div>
            </div>
         </div>
@@ -447,15 +533,75 @@ const App: React.FC = () => {
             <div className="bg-white p-10 rounded-[50px] shadow-2xl border-l-[15px] border-orange-600 space-y-10">
               <div className="flex justify-between items-center flex-wrap gap-4">
                  <h2 className="text-4xl font-black italic uppercase">Mi Dashboard</h2>
-                 <div className="flex gap-4">
-                    <button onClick={probarNotificacion} className="bg-gray-200 text-black px-6 py-3 rounded-full font-black text-[10px] uppercase hover:bg-gray-300 transition-all">Test Notificación 🔔</button>
-                    <button onClick={() => setShowPromoManager(!showPromoManager)} className="bg-orange-600 text-white px-8 py-3 rounded-full font-black text-[10px] uppercase shadow-lg hover:scale-105 transition-all">Promo Relámpago ⚡</button>
-                    {!isEditing && <button onClick={() => setIsEditing(true)} className="bg-black text-white px-8 py-3 rounded-full font-black text-[10px] uppercase shadow hover:bg-gray-800 transition-all">Editar Local</button>}
+                 <div className="flex gap-3 flex-wrap">
+                    <button onClick={() => setShowMenuManager(!showMenuManager)} className="bg-blue-600 text-white px-6 py-3 rounded-full font-black text-[10px] uppercase shadow-lg hover:bg-blue-700 transition-all">Gestión de Carta 📜</button>
+                    <button onClick={() => setShowPromoManager(!showPromoManager)} className="bg-orange-600 text-white px-6 py-3 rounded-full font-black text-[10px] uppercase shadow-lg hover:scale-105 transition-all">Promo Relámpago ⚡</button>
+                    {!isEditing && <button onClick={() => setIsEditing(true)} className="bg-black text-white px-6 py-3 rounded-full font-black text-[10px] uppercase shadow hover:bg-gray-800 transition-all">Editar Local</button>}
                  </div>
               </div>
 
               {saveStatus && <div className="bg-orange-50 text-orange-600 p-4 rounded-2xl font-black uppercase text-center animate-pulse">{saveStatus}</div>}
 
+              {/* GESTIÓN DE CARTA / MENÚ */}
+              {showMenuManager && (
+                <div className="bg-blue-50 p-8 rounded-[40px] border-2 border-blue-100 animate-fadeIn space-y-8">
+                  <div className="flex justify-between items-center">
+                    <h3 className="text-xl font-black uppercase italic">Gestión de Carta / Menú Digital</h3>
+                    <button onClick={() => setShowMenuManager(false)} className="text-gray-400 font-black">CERRAR ✕</button>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    {/* OPCIÓN A: IA SCANNER */}
+                    <div className="bg-white p-6 rounded-[30px] border border-blue-200 shadow-sm space-y-4">
+                      <div className="flex items-center gap-2">
+                        <span className="text-2xl">✨</span>
+                        <h4 className="font-black uppercase italic text-sm">IA Scanner (PDF/Imagen)</h4>
+                      </div>
+                      <p className="text-[11px] text-gray-500 font-bold leading-tight">Sube una foto de tu menú y Gemini extraerá automáticamente los platillos y precios.</p>
+                      <label className={`w-full flex flex-col items-center justify-center p-6 border-2 border-dashed border-blue-300 rounded-2xl cursor-pointer hover:bg-blue-50 transition-all ${isScanning ? 'opacity-50 pointer-events-none' : ''}`}>
+                        <span className="text-xs font-black uppercase text-blue-600">{isScanning ? 'Procesando con IA...' : 'Seleccionar Archivo'}</span>
+                        <input type="file" accept="image/*,application/pdf" className="hidden" onChange={handleIAScan} />
+                      </label>
+                      {isScanning && <div className="h-1 bg-blue-200 w-full rounded-full overflow-hidden"><div className="h-full bg-blue-600 animate-progress"></div></div>}
+                    </div>
+
+                    {/* OPCIÓN B: CARGA MANUAL */}
+                    <div className="bg-white p-6 rounded-[30px] border border-blue-200 shadow-sm space-y-4">
+                      <div className="flex items-center gap-2">
+                        <span className="text-2xl">📝</span>
+                        <h4 className="font-black uppercase italic text-sm">Carga Manual</h4>
+                      </div>
+                      <form onSubmit={handleSaveProduct} className="space-y-3">
+                        <input value={productFormData.nombre} onChange={e => setProductFormData({...productFormData, nombre: e.target.value})} className="form-input text-xs" placeholder="Nombre del platillo" required />
+                        <div className="flex gap-2">
+                          <input type="number" value={productFormData.precio} onChange={e => setProductFormData({...productFormData, precio: Number(e.target.value)})} className="form-input text-xs w-24" placeholder="Precio" required />
+                          <input value={productFormData.categoria} onChange={e => setProductFormData({...productFormData, categoria: e.target.value})} className="form-input text-xs" placeholder="Categoría (Ej: Combos)" />
+                        </div>
+                        <input value={productFormData.descripcion} onChange={e => setProductFormData({...productFormData, descripcion: e.target.value})} className="form-input text-xs" placeholder="Breve descripción" />
+                        <button type="submit" className="w-full bg-blue-600 text-white py-3 rounded-xl font-black uppercase text-[10px] shadow-md">Agregar Platillo</button>
+                      </form>
+                    </div>
+                  </div>
+
+                  {/* LISTA DE PRODUCTOS */}
+                  <div className="space-y-3">
+                    <h5 className="text-[10px] font-black uppercase text-blue-600">Mi Carta Actual ({products.filter(p => p.id_negocio === bizFormData.id).length} items)</h5>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {products.filter(p => p.id_negocio === bizFormData.id).map(p => (
+                        <div key={p.id} className="bg-white p-4 rounded-2xl border border-blue-100 flex justify-between items-center group">
+                          <div>
+                            <h6 className="font-black uppercase text-[11px] leading-tight">{p.nombre}</h6>
+                            <p className="text-[10px] font-bold text-gray-400">${p.precio} • {p.categoria}</p>
+                          </div>
+                          <button onClick={() => handleDeleteProduct(p.id!)} className="text-red-400 font-black text-xs hover:text-red-600 transition-all opacity-0 group-hover:opacity-100">✕</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* PROMO RELÁMPAGO (RESTAURADO) */}
               {showPromoManager && (
                 <div className="bg-orange-50 p-8 rounded-[40px] border-2 border-orange-100 animate-fadeIn">
                   <h3 className="text-xl font-black uppercase italic mb-6">Módulo Promo Relámpago</h3>
@@ -486,6 +632,7 @@ const App: React.FC = () => {
                 </div>
               )}
 
+              {/* EDICIÓN DE LOCAL (RESTAURADO) */}
               {isEditing ? (
                 <div className="bg-gray-50 p-8 rounded-[40px] border border-gray-200 animate-fadeIn">
                   <h3 className="text-xl font-black uppercase italic mb-6">Información del Negocio</h3>
@@ -575,7 +722,24 @@ const App: React.FC = () => {
                         <h2 className="text-4xl font-black italic uppercase leading-none mb-2">{selectedBusiness?.nombre}</h2>
                         <p className="text-sm font-bold text-gray-500">{selectedBusiness?.descripcion}</p>
                       </div>
+                      
+                      {/* CARTA DIGITAL EN DETALLES */}
                       <div className="space-y-4">
+                        <h5 className="text-[11px] font-black uppercase text-blue-600 tracking-[0.3em]">CARTA DIGITAL</h5>
+                        <div className="grid grid-cols-1 gap-3">
+                          {products.filter(p => p.id_negocio === selectedBusinessId).length === 0 ? <p className="text-gray-300 italic text-xs">Aún no se ha cargado el menú digital.</p> : products.filter(p => p.id_negocio === selectedBusinessId).map(p => (
+                            <div key={p.id} className="flex justify-between items-center border-b border-gray-100 pb-3">
+                              <div className="flex-1">
+                                <span className="text-sm font-black uppercase block">{p.nombre}</span>
+                                <span className="text-[10px] font-bold text-gray-400">{p.descripcion}</span>
+                              </div>
+                              <span className="text-sm font-black text-orange-600 ml-4">${p.precio}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-4 pt-6 border-t border-gray-100">
                         <h5 className="text-[11px] font-black uppercase text-orange-600 tracking-[0.3em]">CUPONES Y OFERTAS</h5>
                         {coupons.filter(c => c.idNegocio === selectedBusinessId).length === 0 ? <p className="text-gray-300 italic">No hay cupones disponibles en este momento.</p> : coupons.filter(c => c.idNegocio === selectedBusinessId).map(c => (
                           <div key={c.id} className="bg-black text-white p-6 rounded-[35px] flex items-center justify-between shadow-xl border-l-8 border-orange-600 group">
@@ -628,17 +792,19 @@ const App: React.FC = () => {
       </main>
 
       <footer className="bg-black text-white p-12 text-center border-t-[10px] border-orange-600 mt-10">
-        <div className="text-[11px] font-black uppercase tracking-[0.5em] text-orange-500 italic">CALLE DEL HAMBRE - ADMIN v3.5 INTEGRATED</div>
+        <div className="text-[11px] font-black uppercase tracking-[0.5em] text-orange-500 italic">CALLE DEL HAMBRE - ADMIN v3.6 AI SCANNER</div>
         <p className="text-[9px] text-white/20 mt-4 uppercase font-bold">Ubicación Actual: {userLocation.lat.toFixed(4)}, {userLocation.lng.toFixed(4)}</p>
       </footer>
 
       <style dangerouslySetInnerHTML={{ __html: `
         @keyframes fadeIn { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes pushIn { from { opacity: 0; transform: translate(-50%, -30px); } to { opacity: 1; transform: translate(-50%, 0); } }
-        @keyframes scaleIn { from { transform: scale(0.5); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+        @keyframes scaleIn { from { scale: 0.5; opacity: 0; } to { scale: 1; opacity: 1; } }
+        @keyframes progress { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
         .animate-fadeIn { animation: fadeIn 0.4s ease-out forwards; }
         .animate-pushIn { animation: pushIn 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
         .animate-scaleIn { animation: scaleIn 0.3s ease-out forwards; }
+        .animate-progress { animation: progress 1.5s linear infinite; }
         .form-input { 
           background-color: #F8F8F8 !important; padding: 14px 20px !important; border: 2px solid transparent !important; width: 100%; border-radius: 18px; font-weight: 700; outline: none; transition: all 0.2s; font-size: 14px; color: black;
         }
