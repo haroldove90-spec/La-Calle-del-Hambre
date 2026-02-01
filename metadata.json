@@ -1,0 +1,7 @@
+{
+  "name": "Calle del Hambre",
+  "description": "Una aplicación para gestionar negocios de comida, cupones de descuento y geofencing basado en ubicación.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
