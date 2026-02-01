@@ -40,6 +40,8 @@ export const MOCK_COUPONS: Coupon[] = [
 export const MOCK_USERS: User[] = [
   {
     id: 'user_999',
+    // Fix: Added missing role property to satisfy User interface
+    role: 'CLIENTE',
     historialCupones: ['cup_101'],
     ultimaUbicacion: { lat: 10.4850, lng: -66.9000 }
   }
