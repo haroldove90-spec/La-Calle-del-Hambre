@@ -49,6 +49,14 @@ const App: React.FC = () => {
   });
   const mapRef = useRef<any>(null);
 
+  // Exponer función global para que Leaflet pueda interactuar con el estado de React
+  useEffect(() => {
+    (window as any).selectBusinessFromMap = (id: string) => {
+      setSelectedBusinessId(id);
+      setActiveTab('cupones');
+    };
+  }, []);
+
   const fetchAllData = async () => {
     setLoading(true);
     try {
@@ -59,7 +67,7 @@ const App: React.FC = () => {
       if (cError) console.error("Error al cargar cupones de Supabase:", cError);
 
       if (!bData || bData.length === 0) {
-        console.warn("La tabla 'negocios' está vacía o no se pudo leer. Revisa la API Key y los permisos RLS en Supabase.");
+        console.warn("La tabla 'negocios' está vacía.");
       }
 
       setBusinesses((bData || []).map(b => ({
@@ -87,19 +95,18 @@ const App: React.FC = () => {
 
   useEffect(() => { 
     fetchAllData();
-    // Obtener ubicación real al inicio si es posible
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
           setUserLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
           setIsGPSEnabled(true);
         },
-        (err) => console.warn("No se pudo obtener GPS al inicio:", err.message)
+        (err) => console.warn("GPS inicial no disponible:", err.message)
       );
     }
   }, []);
 
-  // Lógica para inicializar el mapa cuando se entra en la pestaña 'geofencing'
+  // Lógica de Mapa con Pines Reales y Auto-Ajuste
   useEffect(() => {
     if (activeTab === 'geofencing' && !loading) {
       const initMap = () => {
@@ -107,40 +114,51 @@ const App: React.FC = () => {
           mapRef.current.remove();
         }
         
-        const map = L.map('map').setView([userLocation.lat, userLocation.lng], 15);
+        const map = L.map('map');
         mapRef.current = map;
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          attribution: '&copy; OpenStreetMap contributors'
+          attribution: '&copy; OpenStreetMap'
         }).addTo(map);
 
-        // Marcador del usuario
+        // Crear contenedor de límites para el auto-ajuste (fitBounds)
+        const bounds = L.latLngBounds([userLocation.lat, userLocation.lng]);
+
+        // Pin de Ubicación del Usuario (Punto Azul)
         L.marker([userLocation.lat, userLocation.lng], {
           icon: L.divIcon({
             className: 'user-marker',
-            html: '<div style="background-color: #3b82f6; width: 15px; height: 15px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 10px rgba(0,0,0,0.5);"></div>'
+            html: '<div style="background-color: #3b82f6; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 12px rgba(59,130,246,0.8);"></div>'
           })
-        }).addTo(map).bindPopup('<b>Estás aquí</b>').openPopup();
+        }).addTo(map).bindPopup('<b class="font-sans text-[10px] uppercase">Tu Ubicación</b>');
 
-        // Marcadores de negocios
+        // Pines de Negocios desde Supabase
         businesses.forEach(b => {
-          const marker = L.marker([b.coordenadas.lat, b.coordenadas.lng]).addTo(map);
+          const open = isBusinessOpen(b.hora_apertura, b.hora_cierre);
+          const markerLocation = [b.coordenadas.lat, b.coordenadas.lng];
+          bounds.extend(markerLocation); // Añadir a los límites
+
+          const marker = L.marker(markerLocation).addTo(map);
+          
           const popupContent = `
-            <div class="p-2 font-sans">
-              <h3 class="font-black uppercase italic text-orange-600">${b.nombre}</h3>
-              <p class="text-[10px] text-gray-500 mb-2">${b.categoria}</p>
-              ${b.telefono ? `
-                <a href="https://wa.me/${b.telefono.replace(/\+/g, '').replace(/\s/g, '')}" target="_blank" class="block text-center bg-[#25D366] text-white text-[9px] font-black py-2 rounded-lg uppercase italic mt-1">
-                  Pedir por WhatsApp
-                </a>
-              ` : ''}
+            <div class="p-2 font-sans min-w-[120px]">
+              <h3 class="font-black uppercase italic text-orange-600 leading-tight">${b.nombre}</h3>
+              <p class="text-[9px] text-gray-500 font-bold mb-1">${b.categoria}</p>
+              <p class="text-[9px] font-black ${open ? 'text-green-500' : 'text-red-500'} mb-3">
+                ${open ? '● ABIERTO AHORA' : '● CERRADO'}
+              </p>
+              <button onclick="window.selectBusinessFromMap('${b.id}')" class="w-full bg-black text-white text-[9px] font-black py-2 rounded-lg uppercase italic shadow-lg hover:bg-orange-600 transition-colors">
+                Ver Detalles
+              </button>
             </div>
           `;
-          marker.bindPopup(popupContent);
+          marker.bindPopup(popupContent, { closeButton: false, offset: [0, -10] });
         });
+
+        // Ajustar el mapa para mostrar todos los pines
+        map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16 });
       };
       
-      // Delay pequeño para asegurar que el div #map ya esté en el DOM
       setTimeout(initMap, 100);
     }
   }, [activeTab, loading, userLocation, businesses]);
@@ -164,7 +182,6 @@ const App: React.FC = () => {
   const selectedBusiness = useMemo(() => businesses.find(b => b.id === selectedBusinessId), [selectedBusinessId, businesses]);
   const businessCoupons = useMemo(() => coupons.filter(c => c.idNegocio === selectedBusinessId), [selectedBusinessId, coupons]);
 
-  // Fix: Added handleSaveBusiness function to persist data to Supabase
   const handleSaveBusiness = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaveStatus("Guardando local...");
@@ -182,19 +199,13 @@ const App: React.FC = () => {
           hora_cierre: bizFormData.hora_cierre
         }
       ]);
-
       if (error) throw error;
-
-      setSaveStatus("✅ ¡NEGOCIO REGISTRADO CON ÉXITO!");
-      setBizFormData({
-        nombre: '', descripcion: '', categoria: 'Hamburguesas', coordenadas: { lat: 19.6366, lng: -99.2155 }, imagenMenu: '', telefono: '', hora_apertura: '10:00', hora_cierre: '22:00'
-      });
+      setSaveStatus("✅ ¡ÉXITO!");
+      setBizFormData({ nombre: '', descripcion: '', categoria: 'Hamburguesas', coordenadas: { lat: 19.6366, lng: -99.2155 }, imagenMenu: '', telefono: '', hora_apertura: '10:00', hora_cierre: '22:00' });
       fetchAllData();
       setTimeout(() => setSaveStatus(null), 4000);
     } catch (err: any) {
-      console.error("Error al guardar:", err);
-      setSaveStatus("❌ ERROR: " + (err.message || "No se pudo guardar"));
-      setTimeout(() => setSaveStatus(null), 5000);
+      setSaveStatus("❌ ERROR: " + err.message);
     }
   };
 
@@ -211,7 +222,7 @@ const App: React.FC = () => {
             ) : (
               <div className="bg-white p-20 rounded-3xl text-center">
                 <span className="text-6xl mb-6 block">🚫</span>
-                <p className="font-black uppercase text-black italic">Este local aún no ha subido su menú</p>
+                <p className="font-black uppercase text-black italic">No hay imagen de menú disponible</p>
               </div>
             )}
           </div>
@@ -252,23 +263,31 @@ const App: React.FC = () => {
       </nav>
 
       <main className="flex-1 container mx-auto p-4 md:p-8 max-w-7xl">
-        {loading && <div className="text-center py-20 font-black text-orange-600 animate-pulse italic uppercase tracking-[0.3em]">Cargando experiencia real...</div>}
+        {loading && <div className="text-center py-20 font-black text-orange-600 animate-pulse italic uppercase tracking-[0.3em]">Conectando con Supabase...</div>}
         
         {!loading && (
           <div className="animate-fadeIn">
             {activeTab === 'geofencing' && (
               <div className="max-w-5xl mx-auto space-y-8">
-                <div className="bg-white p-6 rounded-[50px] shadow-2xl border border-gray-100">
-                  <h2 className="text-3xl font-black italic uppercase mb-6 text-center">Explora el Mapa</h2>
+                <div className="bg-white p-6 md:p-10 rounded-[50px] shadow-2xl border border-gray-100">
+                  <div className="flex justify-between items-center mb-6">
+                    <h2 className="text-3xl font-black italic uppercase">Explora la Calle</h2>
+                    <div className="flex items-center gap-2">
+                      <span className="w-3 h-3 bg-[#3b82f6] rounded-full shadow-[0_0_8px_rgba(59,130,246,0.6)]"></span>
+                      <span className="text-[9px] font-black uppercase text-gray-400">Tú</span>
+                      <span className="w-3 h-3 bg-blue-500 rounded-sm ml-2"></span>
+                      <span className="text-[9px] font-black uppercase text-gray-400">Locales</span>
+                    </div>
+                  </div>
                   <div id="map" className="overflow-hidden"></div>
                   <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-4 text-center">
-                    <div className="p-4 bg-orange-50 rounded-2xl">
-                      <p className="text-[10px] font-black text-orange-600 uppercase italic">Ubicación GPS</p>
-                      <p className="font-mono text-[12px]">{userLocation.lat.toFixed(6)}, {userLocation.lng.toFixed(6)}</p>
+                    <div className="p-5 bg-orange-50 rounded-3xl border border-orange-100">
+                      <p className="text-[10px] font-black text-orange-600 uppercase italic">Coordenadas Reales</p>
+                      <p className="font-mono text-[12px] mt-1">{userLocation.lat.toFixed(6)}, {userLocation.lng.toFixed(6)}</p>
                     </div>
-                    <div className="p-4 bg-gray-50 rounded-2xl">
-                      <p className="text-[10px] font-black text-gray-500 uppercase italic">Locales en Radio</p>
-                      <p className="font-black text-xl italic">{businesses.length} ALIADOS</p>
+                    <div className="p-5 bg-gray-50 rounded-3xl border border-gray-100">
+                      <p className="text-[10px] font-black text-gray-500 uppercase italic">Locales en tu radar</p>
+                      <p className="font-black text-2xl italic text-black mt-1">{businesses.length} ALIADOS</p>
                     </div>
                   </div>
                 </div>
@@ -419,14 +438,7 @@ const App: React.FC = () => {
 - categoria (text)
 - telefono (text)
 - hora_apertura (time)
-- hora_cierre (time)
-
-TABLA: cupones
-- id (uuid, primary key)
-- id_negocio (uuid, fk)
-- descripcion_descuento (text)
-- codigo_qr (text)
-- fecha_expiracion (timestamptz)`}
+- hora_cierre (time)`}
                 </pre>
               </div>
             )}
@@ -447,7 +459,7 @@ TABLA: cupones
 
       <footer className="bg-black text-white p-12 text-center border-t-[10px] border-orange-600 mt-10">
         <div className="text-[12px] font-black uppercase tracking-[0.4em] text-orange-500 italic">📍 LA CALLE DEL HAMBRE - GPS REAL ENGINE</div>
-        <p className="text-[9px] text-white/20 mt-4 font-black uppercase tracking-widest italic">Vercel 2.8 - OpenStreetMap Integration</p>
+        <p className="text-[9px] text-white/20 mt-4 font-black uppercase tracking-widest italic text-[8px]">Vercel 2.9 - Leaflet & Supabase Integrated</p>
       </footer>
 
       <style dangerouslySetInnerHTML={{ __html: `
@@ -464,8 +476,10 @@ TABLA: cupones
           flex-shrink: 0; padding: 18px 20px; text-transform: uppercase; font-weight: 900; font-size: 10px; color: #9ca3af; border-bottom: 3px solid transparent; transition: all 0.3s ease; white-space: nowrap;
         }
         .nav-tab-button.active { color: #ea580c !important; border-bottom-color: #ea580c !important; }
-        .leaflet-popup-content-wrapper { border-radius: 20px !important; padding: 10px !important; }
+        
+        .leaflet-popup-content-wrapper { border-radius: 20px !important; padding: 4px !important; border-bottom: 4px solid #ea580c; }
         .leaflet-popup-tip-container { display: none; }
+        .leaflet-div-icon { background: none !important; border: none !important; }
       `}} />
     </div>
   );
