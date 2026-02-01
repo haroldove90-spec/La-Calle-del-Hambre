@@ -37,7 +37,7 @@ const isBusinessOpen = (apertura?: string, cierre?: string): boolean => {
 const App: React.FC = () => {
   // --- ESTADO DE ROLES ---
   const [userRole, setUserRole] = useState<UserRole | null>(null);
-  const [activeTab, setActiveTab] = useState<string>('cupones');
+  const [activeTab, setActiveTab] = useState<string>('geofencing');
   
   // --- ESTADO DE DATOS ---
   const [coupons, setCoupons] = useState<Coupon[]>([]);
@@ -47,9 +47,8 @@ const App: React.FC = () => {
   const [userLocation, setUserLocation] = useState<GeoPoint>(DEFAULT_LOCATION);
   const [isGPSEnabled, setIsGPSEnabled] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [isSyncing, setIsSyncing] = useState(false); // Sincronización en segundo plano
+  const [isSyncing, setIsSyncing] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
-  const [menuModalUrl, setMenuModalUrl] = useState<string | null>(null);
   const [selectedBusinessId, setSelectedBusinessId] = useState<string | null>(null);
   const [activeCoupon, setActiveCoupon] = useState<Coupon | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -122,7 +121,8 @@ const App: React.FC = () => {
       })));
 
       if (userRole === 'PATROCINADOR' && parsedBiz.length > 0) {
-        const myId = parsedBiz[0].id;
+        const myId = parsedBiz[0].id; // Asumimos el primero para el MVP del dashboard
+        setBizFormData(parsedBiz[0]);
         const { data: mData } = await supabase.from('metricas').select('tipo_evento').eq('id_negocio', myId);
         if (mData) {
           const counts = mData.reduce((acc: any, curr: any) => {
@@ -141,112 +141,129 @@ const App: React.FC = () => {
     }
   };
 
-  // --- FIX: Added handleSaveBusiness function ---
   const handleSaveBusiness = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSyncing(true);
+    setSaveStatus("Guardando...");
     try {
-      const { error } = await supabase.from('negocios').insert([{
-        nombre: bizFormData.nombre,
-        descripcion: bizFormData.descripcion,
-        lat: bizFormData.coordenadas?.lat || DEFAULT_LOCATION.lat,
-        lng: bizFormData.coordenadas?.lng || DEFAULT_LOCATION.lng,
-        imagen_menu: bizFormData.imagenMenu,
-        categoria: bizFormData.categoria,
-        telefono: bizFormData.telefono,
-        hora_apertura: bizFormData.hora_apertura,
-        hora_cierre: bizFormData.hora_cierre
-      }]);
-
-      if (error) throw error;
-      
-      setBizFormData({
-        nombre: '', descripcion: '', categoria: 'Hamburguesas', coordenadas: DEFAULT_LOCATION, imagenMenu: '', telefono: '', hora_apertura: '10:00', hora_cierre: '22:00'
-      });
+      const isUpdate = !!bizFormData.id;
+      if (isUpdate) {
+        const { error } = await supabase.from('negocios').update({
+          nombre: bizFormData.nombre,
+          descripcion: bizFormData.descripcion,
+          imagen_menu: bizFormData.imagenMenu,
+          telefono: bizFormData.telefono,
+          hora_apertura: bizFormData.hora_apertura,
+          hora_cierre: bizFormData.hora_cierre,
+          categoria: bizFormData.categoria
+        }).eq('id', bizFormData.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('negocios').insert([{
+          nombre: bizFormData.nombre,
+          descripcion: bizFormData.descripcion,
+          lat: bizFormData.coordenadas?.lat || DEFAULT_LOCATION.lat,
+          lng: bizFormData.coordenadas?.lng || DEFAULT_LOCATION.lng,
+          imagen_menu: bizFormData.imagenMenu,
+          categoria: bizFormData.categoria,
+          telefono: bizFormData.telefono,
+          hora_apertura: bizFormData.hora_apertura,
+          hora_cierre: bizFormData.hora_cierre
+        }]);
+        if (error) throw error;
+      }
+      setSaveStatus("¡Éxito!");
+      setIsEditing(false);
       await fetchAllData();
-      alert('Negocio registrado con éxito');
-    } catch (err) {
-      console.error("Error saving business:", err);
-      alert('Error al guardar el negocio en Supabase');
-    } finally {
-      setIsSyncing(false);
-    }
+      setTimeout(() => setSaveStatus(null), 3000);
+    } catch (err: any) {
+      setSaveStatus("Error: " + err.message);
+    } finally { setIsSyncing(false); }
   };
 
-  // --- RADAR EN SEGUNDO PLANO CON RETARDO DE 5s ---
+  const handleSavePromo = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!bizFormData.id) return;
+    setIsSyncing(true);
+    setSaveStatus("Lanzando promo...");
+    try {
+      const { data: existing } = await supabase.from('promociones').select('id').eq('id_negocio', bizFormData.id).maybeSingle();
+      if (existing) {
+        const { error } = await supabase.from('promociones').update({
+          mensaje: promoFormData.mensaje,
+          radio_km: promoFormData.radio_km,
+          frecuencia_horas: promoFormData.frecuencia_horas,
+          activa: promoFormData.activa,
+          imagen_url: promoFormData.imagen_url
+        }).eq('id', existing.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('promociones').insert([{
+          id_negocio: bizFormData.id,
+          mensaje: promoFormData.mensaje,
+          radio_km: promoFormData.radio_km,
+          frecuencia_horas: promoFormData.frecuencia_horas,
+          activa: promoFormData.activa,
+          imagen_url: promoFormData.imagen_url
+        }]);
+        if (error) throw error;
+      }
+      setSaveStatus("Promo Relámpago Activada ⚡");
+      setShowPromoManager(false);
+      await fetchAllData();
+      setTimeout(() => setSaveStatus(null), 3000);
+    } catch (err: any) {
+      setSaveStatus("Error: " + err.message);
+    } finally { setIsSyncing(false); }
+  };
+
+  // RADAR LOGIC
   useEffect(() => {
     if (userRole === 'CLIENTE' && promotions.length > 0) {
       const verificarRadar = () => {
         try {
           const now = Date.now();
           const promoMemory = JSON.parse(localStorage.getItem('promo_radar_memory') || '{}');
-
           promotions.forEach(promo => {
             if (!promo.activa) return;
             const biz = businesses.find(b => b.id === promo.id_negocio);
             if (!biz) return;
-
             const lastSeen = promoMemory[promo.id] || 0;
             const frequencyLimit = (promo.frecuencia_horas || 4) * 3600000;
-            
             if (now - lastSeen < frequencyLimit) return;
-
             const dist = calculateDistance(userLocation.lat, userLocation.lng, biz.coordenadas.lat, biz.coordenadas.lng);
-            
             if (dist <= promo.radio_km) {
               if (audioRef.current) audioRef.current.play().catch(() => {});
               setActivePromoNotif({ promo, biz });
-              
               promoMemory[promo.id] = now;
               localStorage.setItem('promo_radar_memory', JSON.stringify(promoMemory));
             }
           });
-        } catch (e) {
-          console.error("Error radar background:", e);
-        }
+        } catch (e) { console.error(e); }
       };
-
-      // Iniciar radar con retardo para no estresar el render inicial
       const timerId = setTimeout(() => {
-        verificarRadar(); // Ejecución inicial tras 5s
+        verificarRadar();
         const intervalId = setInterval(verificarRadar, 60000);
         return () => clearInterval(intervalId);
       }, 5000);
-
       return () => clearTimeout(timerId);
     }
-  }, [userRole, promotions.length, businesses.length, userLocation]);
+  }, [userRole, promotions, businesses, userLocation]);
 
-  // GPS Fallback y seguimiento
+  // GPS Seguimiento
   useEffect(() => { 
     if (userRole) {
       fetchAllData();
-      
       if (navigator.geolocation) {
-        // Intento con timeout de 3s para fallback rápido
-        const fastId = setTimeout(() => {
-          if (!isGPSEnabled) {
-            console.warn("GPS timeout: Usando Izcalli por defecto");
-            setUserLocation(DEFAULT_LOCATION);
-          }
-        }, 3000);
-
         const watchId = navigator.geolocation.watchPosition(
           (pos) => {
-            clearTimeout(fastId);
             setUserLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
             setIsGPSEnabled(true);
           },
-          () => {
-            clearTimeout(fastId);
-            setUserLocation(DEFAULT_LOCATION);
-          },
-          { enableHighAccuracy: false, timeout: 10000 }
+          () => setUserLocation(DEFAULT_LOCATION),
+          { enableHighAccuracy: true, timeout: 10000 }
         );
-        return () => {
-          clearTimeout(fastId);
-          navigator.geolocation.clearWatch(watchId);
-        };
+        return () => navigator.geolocation.clearWatch(watchId);
       }
     }
   }, [userRole]);
@@ -266,26 +283,38 @@ const App: React.FC = () => {
           L.marker([userLocation.lat, userLocation.lng], {
             icon: L.divIcon({
               className: 'user-marker',
-              html: '<div style="background-color: #3b82f6; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 12px rgba(59,130,246,0.8);"></div>'
+              html: `<div style="background-color: #3b82f6; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 12px rgba(59,130,246,0.8);"></div>`
             })
-          }).addTo(map).bindPopup('<b class="font-sans text-[10px] uppercase">Tu Ubicación</b>');
+          }).addTo(map);
 
           businesses.forEach(b => {
             const open = isBusinessOpen(b.hora_apertura, b.hora_cierre);
+            const promoActiva = promotions.find(p => p.id_negocio === b.id && p.activa);
             const markerLocation = [b.coordenadas.lat, b.coordenadas.lng];
             bounds.extend(markerLocation);
 
-            const marker = L.marker(markerLocation).addTo(map);
+            const iconHtml = promoActiva ? 
+              `<div class="flex items-center justify-center animate-bounce">
+                <div style="background-color: #ef4444; width: 28px; height: 28px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 20px #ef4444; display: flex; align-items: center; justify-center: center; color: white; font-size: 14px;">🔥</div>
+              </div>` : 
+              `<div style="background-color: #ea580c; width: 14px; height: 14px; border-radius: 50%; border: 2px solid white;"></div>`;
+
+            const marker = L.marker(markerLocation, {
+              icon: L.divIcon({ className: 'custom-biz-marker', html: iconHtml, iconSize: [30, 30] })
+            }).addTo(map);
+
             const popupContent = `
-              <div class="p-2 font-sans min-w-[140px]">
-                <h3 class="font-black uppercase italic text-orange-600 leading-tight">${b.nombre}</h3>
-                <p class="text-[9px] font-black ${open ? 'text-green-500' : 'text-red-500'} mb-3">
+              <div class="p-3 font-sans min-w-[160px]">
+                <h3 class="font-black uppercase text-orange-600 mb-0.5 leading-tight">${b.nombre}</h3>
+                <span class="text-[9px] font-bold text-gray-400 uppercase block mb-2">${b.categoria}</span>
+                <p class="text-[10px] font-black ${open ? 'text-green-500' : 'text-red-500'} mb-3">
                   ${open ? '● ABIERTO' : '● CERRADO'}
                 </p>
                 <div class="space-y-2">
                   <a href="https://www.google.com/maps/dir/?api=1&destination=${b.coordenadas.lat},${b.coordenadas.lng}" 
                      onclick="window.logMapsClick('${b.id}')"
-                     target="_blank" class="flex items-center justify-center gap-1 w-full bg-orange-600 text-white text-[9px] font-black py-2.5 rounded-lg uppercase italic shadow-lg">📍 Ir</a>
+                     target="_blank" class="flex items-center justify-center gap-1 w-full bg-orange-600 text-white text-[10px] font-black py-2.5 rounded-lg uppercase italic shadow-md transition-all hover:scale-105">📍 IR AHORA</a>
+                  <button onclick="window.selectBusinessFromMap('${b.id}')" class="w-full bg-black text-white text-[10px] font-black py-2 rounded-lg uppercase italic shadow transition-all hover:bg-gray-800">Ver Detalles</button>
                 </div>
               </div>
             `;
@@ -293,14 +322,13 @@ const App: React.FC = () => {
           });
 
           map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16 });
-        } catch (e) {
-          console.error("Error mapa:", e);
-        }
+        } catch (e) { console.error(e); }
       };
       setTimeout(initMap, 200);
     }
-  }, [activeTab, userLocation, businesses.length, userRole]);
+  }, [activeTab, userLocation, businesses, promotions, userRole]);
 
+  // Derived data
   const tabs = useMemo(() => {
     const baseTabs = [
       { id: 'geofencing', label: 'MAPA REAL', roles: ['CLIENTE', 'PATROCINADOR', 'ADMIN'] },
@@ -312,43 +340,24 @@ const App: React.FC = () => {
     return baseTabs.filter(tab => tab.roles.includes(userRole || ''));
   }, [userRole]);
 
-  const myBusiness = useMemo(() => {
-    if (userRole === 'PATROCINADOR') return businesses[0]; 
-    return null;
-  }, [businesses, userRole]);
-
-  useEffect(() => {
-    if (userRole && tabs.length > 0 && !tabs.find(t => t.id === activeTab)) {
-      setActiveTab(tabs[0].id);
-    }
-  }, [userRole, tabs]);
-
   const sortedBusinesses = useMemo(() => {
-    const lowerSearch = searchTerm.toLowerCase();
-    const filtered = businesses.filter(b => 
-      b.nombre.toLowerCase().includes(lowerSearch) || 
-      b.categoria.toLowerCase().includes(lowerSearch)
-    );
-    return [...filtered].sort((a, b) => {
-      const distA = calculateDistance(userLocation.lat, userLocation.lng, a.coordenadas.lat, a.coordenadas.lng);
-      const distB = calculateDistance(userLocation.lat, userLocation.lng, b.coordenadas.lat, b.coordenadas.lng);
-      return distA - distB;
-    });
+    return businesses
+      .filter(b => b.nombre.toLowerCase().includes(searchTerm.toLowerCase()) || b.categoria.toLowerCase().includes(searchTerm.toLowerCase()))
+      .sort((a, b) => {
+        const distA = calculateDistance(userLocation.lat, userLocation.lng, a.coordenadas.lat, a.coordenadas.lng);
+        const distB = calculateDistance(userLocation.lat, userLocation.lng, b.coordenadas.lat, b.coordenadas.lng);
+        return distA - distB;
+      });
   }, [businesses, searchTerm, userLocation]);
 
-  const selectedBusiness = useMemo(() => businesses.find(b => b.id === selectedBusinessId), [selectedBusinessId, businesses]);
-  const businessCoupons = useMemo(() => coupons.filter(c => c.idNegocio === selectedBusinessId), [selectedBusinessId, coupons]);
+  const selectedBusiness = useMemo(() => businesses.find(b => b.id === selectedBusinessId), [businesses, selectedBusinessId]);
 
   const handleGoToPromo = () => {
     if (activePromoNotif) {
       const biz = activePromoNotif.biz;
       setActiveTab('geofencing');
       setActivePromoNotif(null);
-      setTimeout(() => {
-        if (mapRef.current) {
-          mapRef.current.setView([biz.coordenadas.lat, biz.coordenadas.lng], 17);
-        }
-      }, 300);
+      setTimeout(() => { if (mapRef.current) mapRef.current.setView([biz.coordenadas.lat, biz.coordenadas.lng], 18); }, 400);
     }
   };
 
@@ -356,7 +365,7 @@ const App: React.FC = () => {
     if (businesses.length > 0) {
       if (audioRef.current) audioRef.current.play().catch(() => {});
       setActivePromoNotif({
-        promo: { id: 'test', id_negocio: businesses[0].id, radio_km: 2, mensaje: '¡PROBANDO RADAR! 🍔🔥', frecuencia_horas: 1, activa: true },
+        promo: { id: 'test', id_negocio: businesses[0].id, radio_km: 2, mensaje: '¡ESTO ES UNA PRUEBA! 🍔🔥', frecuencia_horas: 1, activa: true },
         biz: businesses[0]
       });
     }
@@ -367,7 +376,7 @@ const App: React.FC = () => {
       <div className="min-h-screen bg-black flex items-center justify-center p-6">
         <div className="max-w-md w-full bg-[#111] p-10 rounded-[60px] border border-orange-600/30 text-center shadow-2xl animate-fadeIn">
           <span className="text-7xl block mb-6">🍔</span>
-          <h1 className="text-3xl font-black text-orange-500 italic uppercase mb-2 leading-none">Calle del Hambre</h1>
+          <h1 className="text-3xl font-black text-orange-500 italic uppercase mb-2">Calle del Hambre</h1>
           <p className="text-white/40 text-[10px] font-bold tracking-widest uppercase mb-10">Selecciona tu perfil</p>
           <div className="space-y-4">
             <button onClick={() => setUserRole('CLIENTE')} className="w-full bg-white text-black py-5 rounded-[25px] font-black uppercase italic hover:bg-orange-500 hover:text-white transition-all">Soy Comensal 😋</button>
@@ -388,19 +397,17 @@ const App: React.FC = () => {
            <div className="bg-white rounded-[35px] shadow-[0_40px_80px_-20px_rgba(0,0,0,0.4)] border-2 border-orange-500 overflow-hidden relative">
               <button onClick={() => setActivePromoNotif(null)} className="absolute top-4 right-4 bg-gray-100 w-8 h-8 rounded-full flex items-center justify-center font-black text-gray-400 hover:bg-red-500 hover:text-white transition-all z-10">✕</button>
               <div className="flex p-6 gap-5">
-                 <div className="w-24 h-24 rounded-2xl overflow-hidden shadow-inner flex-shrink-0 bg-gray-100">
-                    <img src={activePromoNotif.promo.imagen_url || activePromoNotif.biz.imagenMenu || 'https://via.placeholder.com/150'} className="w-full h-full object-cover" />
+                 <div className="w-24 h-24 rounded-2xl overflow-hidden shadow-inner flex-shrink-0 bg-orange-100 flex items-center justify-center">
+                    {activePromoNotif.promo.imagen_url ? <img src={activePromoNotif.promo.imagen_url} className="w-full h-full object-cover" /> : <span className="text-4xl">🔥</span>}
                  </div>
                  <div className="flex-1">
-                    <span className="text-[10px] font-black uppercase text-orange-600 tracking-widest block mb-1">¡Oferta Cerca! ⚡️</span>
+                    <span className="text-[10px] font-black uppercase text-orange-600 tracking-widest block mb-1">¡Sabor Cerca de Ti! ⚡️</span>
                     <h4 className="text-xl font-black italic uppercase text-black leading-tight mb-1">{activePromoNotif.biz.nombre}</h4>
                     <p className="text-sm font-bold text-gray-500 leading-tight">{activePromoNotif.promo.mensaje}</p>
                  </div>
               </div>
               <div className="px-6 pb-6">
-                 <button onClick={handleGoToPromo} className="w-full bg-orange-600 text-white py-4 rounded-2xl flex items-center justify-center gap-2 font-black uppercase italic text-sm shadow-xl hover:bg-orange-700 transition-all">
-                    🚀 ¡Ir ahora!
-                 </button>
+                 <button onClick={handleGoToPromo} className="w-full bg-orange-600 text-white py-4 rounded-2xl flex items-center justify-center gap-2 font-black uppercase italic text-sm shadow-xl hover:bg-orange-700 transition-all">🚀 ¡Ir ahora!</button>
               </div>
            </div>
         </div>
@@ -411,7 +418,7 @@ const App: React.FC = () => {
           <span className="text-3xl">🍔</span>
           <h1 className="text-2xl font-black uppercase italic text-orange-500">Calle del Hambre</h1>
         </div>
-        <button onClick={() => setUserRole(null)} className="text-[9px] font-black uppercase bg-white/10 px-3 py-2 rounded-full">Salir</button>
+        <button onClick={() => {setUserRole(null); setSelectedBusinessId(null);}} className="text-[9px] font-black uppercase bg-white/10 px-3 py-2 rounded-full">Salir</button>
       </header>
 
       <nav className="bg-white border-b sticky top-0 z-[80] shadow-md overflow-x-auto whitespace-nowrap scrollbar-hide">
@@ -431,37 +438,100 @@ const App: React.FC = () => {
       <main className="flex-1 container mx-auto p-4 max-w-7xl">
         <div className="animate-fadeIn">
           {activeTab === 'geofencing' && (
-            <div className="bg-white p-4 rounded-[40px] shadow-2xl">
-              <div id="map" className="overflow-hidden min-h-[450px]"></div>
+            <div className="bg-white p-4 rounded-[40px] shadow-2xl border border-gray-100">
+              <div id="map" className="overflow-hidden min-h-[500px]"></div>
             </div>
           )}
 
           {activeTab === 'mi_dashboard' && (
-            <div className="bg-white p-8 rounded-[40px] shadow-2xl border-l-[10px] border-orange-600 space-y-8">
+            <div className="bg-white p-10 rounded-[50px] shadow-2xl border-l-[15px] border-orange-600 space-y-10">
               <div className="flex justify-between items-center flex-wrap gap-4">
-                 <h2 className="text-3xl font-black italic uppercase">Mi Dashboard</h2>
-                 <div className="flex gap-2">
-                    <button onClick={probarNotificacion} className="bg-gray-200 text-black px-4 py-2 rounded-full font-black text-[9px] uppercase">Test Radar 🔔</button>
-                    <button onClick={() => setShowPromoManager(!showPromoManager)} className="bg-orange-600 text-white px-6 py-2 rounded-full font-black text-[9px] uppercase shadow-md">Lanzar Promo ⚡️</button>
+                 <h2 className="text-4xl font-black italic uppercase">Mi Dashboard</h2>
+                 <div className="flex gap-4">
+                    <button onClick={probarNotificacion} className="bg-gray-200 text-black px-6 py-3 rounded-full font-black text-[10px] uppercase hover:bg-gray-300 transition-all">Test Notificación 🔔</button>
+                    <button onClick={() => setShowPromoManager(!showPromoManager)} className="bg-orange-600 text-white px-8 py-3 rounded-full font-black text-[10px] uppercase shadow-lg hover:scale-105 transition-all">Promo Relámpago ⚡</button>
+                    {!isEditing && <button onClick={() => setIsEditing(true)} className="bg-black text-white px-8 py-3 rounded-full font-black text-[10px] uppercase shadow hover:bg-gray-800 transition-all">Editar Local</button>}
                  </div>
               </div>
-              
-              {isSyncing && <p className="text-[9px] font-black uppercase text-orange-600 animate-pulse italic">Actualizando métricas en tiempo real...</p>}
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="p-6 bg-orange-50 rounded-3xl text-center border border-orange-100">
-                   <h5 className="text-3xl font-black text-orange-600">{metrics.views}</h5>
-                   <p className="text-[9px] font-black uppercase text-gray-400">Vistas</p>
+              {saveStatus && <div className="bg-orange-50 text-orange-600 p-4 rounded-2xl font-black uppercase text-center animate-pulse">{saveStatus}</div>}
+
+              {showPromoManager && (
+                <div className="bg-orange-50 p-8 rounded-[40px] border-2 border-orange-100 animate-fadeIn">
+                  <h3 className="text-xl font-black uppercase italic mb-6">Módulo Promo Relámpago</h3>
+                  <form onSubmit={handleSavePromo} className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <label className="block col-span-2">
+                      <span className="text-[10px] font-black uppercase text-orange-600 mb-2 block">Mensaje de Alerta (Gancho)</span>
+                      <input value={promoFormData.mensaje} onChange={e => setPromoFormData({...promoFormData, mensaje: e.target.value})} className="form-input" placeholder="Ej: ¡2x1 en hamburguesas hoy!" required />
+                    </label>
+                    <label className="block">
+                      <span className="text-[10px] font-black uppercase text-orange-600 mb-2 block">Radio de Alcance (Km)</span>
+                      <input type="number" step="0.5" value={promoFormData.radio_km} onChange={e => setPromoFormData({...promoFormData, radio_km: Number(e.target.value)})} className="form-input" required />
+                    </label>
+                    <label className="block">
+                      <span className="text-[10px] font-black uppercase text-orange-600 mb-2 block">Frecuencia (Horas)</span>
+                      <input type="number" value={promoFormData.frecuencia_horas} onChange={e => setPromoFormData({...promoFormData, frecuencia_horas: Number(e.target.value)})} className="form-input" required />
+                    </label>
+                    <label className="block col-span-2">
+                      <span className="text-[10px] font-black uppercase text-orange-600 mb-2 block">Imagen URL (Opcional)</span>
+                      <input value={promoFormData.imagen_url} onChange={e => setPromoFormData({...promoFormData, imagen_url: e.target.value})} className="form-input" placeholder="https://..." />
+                    </label>
+                    <div className="col-span-2 flex items-center gap-4 bg-white p-4 rounded-2xl border border-orange-100">
+                      <input type="checkbox" id="promo-active" checked={promoFormData.activa} onChange={e => setPromoFormData({...promoFormData, activa: e.target.checked})} className="w-6 h-6 accent-orange-600 cursor-pointer" />
+                      <label htmlFor="promo-active" className="font-black uppercase italic text-sm cursor-pointer">Activar Promo en Radar</label>
+                    </div>
+                    <button type="submit" className="col-span-2 bg-orange-600 text-white py-4 rounded-2xl font-black uppercase italic text-lg shadow-xl hover:bg-orange-700 transition-all">Lanzar Promo Relámpago 🚀</button>
+                    <button type="button" onClick={() => setShowPromoManager(false)} className="col-span-2 text-[10px] font-black uppercase text-gray-400">Cancelar</button>
+                  </form>
                 </div>
-                <div className="p-6 bg-green-50 rounded-3xl text-center border border-green-100">
-                   <h5 className="text-3xl font-black text-green-600">{metrics.whatsapp}</h5>
-                   <p className="text-[9px] font-black uppercase text-gray-400">WhatsApp</p>
+              )}
+
+              {isEditing ? (
+                <div className="bg-gray-50 p-8 rounded-[40px] border border-gray-200 animate-fadeIn">
+                  <h3 className="text-xl font-black uppercase italic mb-6">Información del Negocio</h3>
+                  <form onSubmit={handleSaveBusiness} className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <label className="block col-span-2">
+                      <span className="text-[10px] font-black uppercase mb-2 block text-gray-400">Nombre del Local</span>
+                      <input value={bizFormData.nombre} onChange={e => setBizFormData({...bizFormData, nombre: e.target.value})} className="form-input" required />
+                    </label>
+                    <label className="block">
+                      <span className="text-[10px] font-black uppercase mb-2 block text-gray-400">WhatsApp de Pedidos</span>
+                      <input value={bizFormData.telefono} onChange={e => setBizFormData({...bizFormData, telefono: e.target.value})} className="form-input" placeholder="Ej: 584120000000" required />
+                    </label>
+                    <label className="block">
+                      <span className="text-[10px] font-black uppercase mb-2 block text-gray-400">Imagen del Menú (Link)</span>
+                      <input value={bizFormData.imagenMenu} onChange={e => setBizFormData({...bizFormData, imagenMenu: e.target.value})} className="form-input" placeholder="https://..." required />
+                    </label>
+                    <label className="block">
+                      <span className="text-[10px] font-black uppercase mb-2 block text-gray-400">Apertura (HH:MM)</span>
+                      <input type="time" value={bizFormData.hora_apertura} onChange={e => setBizFormData({...bizFormData, hora_apertura: e.target.value})} className="form-input" />
+                    </label>
+                    <label className="block">
+                      <span className="text-[10px] font-black uppercase mb-2 block text-gray-400">Cierre (HH:MM)</span>
+                      <input type="time" value={bizFormData.hora_cierre} onChange={e => setBizFormData({...bizFormData, hora_cierre: e.target.value})} className="form-input" />
+                    </label>
+                    <div className="col-span-2 flex gap-4">
+                      <button type="submit" className="flex-1 bg-black text-white py-4 rounded-2xl font-black uppercase italic text-lg shadow-xl hover:bg-gray-800 transition-all">Guardar Datos</button>
+                      <button type="button" onClick={() => setIsEditing(false)} className="px-8 bg-white border-2 border-gray-200 rounded-2xl font-black text-gray-400">Volver</button>
+                    </div>
+                  </form>
                 </div>
-                <div className="p-6 bg-blue-50 rounded-3xl text-center border border-blue-100">
-                   <h5 className="text-3xl font-black text-blue-600">{metrics.maps}</h5>
-                   <p className="text-[9px] font-black uppercase text-gray-400">Mapas</p>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="p-10 bg-orange-50 rounded-[40px] text-center border border-orange-100 shadow-sm">
+                     <h5 className="text-5xl font-black text-orange-600 mb-2">{metrics.views}</h5>
+                     <p className="text-[10px] font-black uppercase text-gray-400 tracking-[0.2em]">Visitas Perfil</p>
+                  </div>
+                  <div className="p-10 bg-green-50 rounded-[40px] text-center border border-green-100 shadow-sm">
+                     <h5 className="text-5xl font-black text-green-600 mb-2">{metrics.whatsapp}</h5>
+                     <p className="text-[10px] font-black uppercase text-gray-400 tracking-[0.2em]">Consultas WA</p>
+                  </div>
+                  <div className="p-10 bg-blue-50 rounded-[40px] text-center border border-blue-100 shadow-sm">
+                     <h5 className="text-5xl font-black text-blue-600 mb-2">{metrics.maps}</h5>
+                     <p className="text-[10px] font-black uppercase text-gray-400 tracking-[0.2em]">Rutas Trazadas</p>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           )}
 
@@ -469,55 +539,54 @@ const App: React.FC = () => {
             <div className="space-y-8">
               {selectedBusinessId === null ? (
                 <>
-                  <div className="bg-black p-8 rounded-[40px] flex items-center justify-between gap-4">
-                    <h2 className="text-3xl font-black text-orange-500 italic uppercase leading-none">LA CALLE</h2>
-                    <input placeholder="Buscar..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-1/2 px-4 py-3 bg-[#F0F0F0] rounded-full text-sm font-bold outline-none"/>
+                  <div className="bg-black p-8 rounded-[40px] flex items-center justify-between gap-4 shadow-xl border-b-4 border-orange-600">
+                    <h2 className="text-3xl font-black text-orange-500 italic uppercase">LA CALLE</h2>
+                    <input placeholder="Buscar antojo o local..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-1/2 px-6 py-4 bg-white/10 text-white rounded-full text-sm font-bold outline-none border border-white/10 focus:border-orange-500 transition-all"/>
                   </div>
-                  
-                  {isSyncing && businesses.length === 0 ? (
-                    <div className="text-center py-20 font-black text-orange-600 animate-pulse italic">BUSCANDO NEGOCIOS...</div>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-6">
-                      {sortedBusinesses.map(b => (
-                        <div key={b.id} className="bg-white rounded-[35px] shadow-xl border border-gray-100 overflow-hidden flex flex-col hover:-translate-y-1 transition-transform">
-                          <div className="h-40 bg-gray-200 cursor-pointer" onClick={() => setSelectedBusinessId(b.id)}>
-                            <img src={b.imagenMenu || 'https://picsum.photos/400/600'} className="w-full h-full object-cover" />
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 mt-10">
+                    {sortedBusinesses.map(b => (
+                      <div key={b.id} className="group bg-white rounded-[45px] shadow-xl border border-gray-100 overflow-hidden flex flex-col hover:-translate-y-2 transition-all duration-300">
+                        <div className="h-44 bg-gray-200 cursor-pointer overflow-hidden" onClick={() => (window as any).selectBusinessFromMap(b.id)}>
+                          <img src={b.imagenMenu || 'https://picsum.photos/400/600'} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                        </div>
+                        <div className="p-7 flex-1 flex flex-col justify-between">
+                          <div>
+                            <h4 className="text-xl font-black italic uppercase truncate text-black mb-1">{b.nombre}</h4>
+                            <span className="text-[10px] font-black uppercase text-orange-500 bg-orange-50 px-3 py-1 rounded-full">{b.categoria}</span>
                           </div>
-                          <div className="p-5 flex-1 flex flex-col justify-between">
-                            <h4 className="text-lg font-black italic uppercase truncate">{b.nombre}</h4>
-                            <div className="grid grid-cols-2 gap-2 mt-4">
-                              <a href={`https://wa.me/${b.telefono}`} target="_blank" onClick={() => logMetric(b.id, 'whatsapp')} className="bg-[#25D366] text-white py-2 rounded-xl text-center font-black text-[9px] uppercase">WhatsApp</a>
-                              <button onClick={() => setSelectedBusinessId(b.id)} className="bg-black text-white py-2 rounded-xl font-black text-[9px] uppercase">Detalles</button>
-                            </div>
+                          <div className="grid grid-cols-2 gap-3 mt-6">
+                            <a href={`https://wa.me/${b.telefono}`} target="_blank" onClick={() => logMetric(b.id, 'whatsapp')} className="bg-[#25D366] text-white py-3 rounded-2xl text-center font-black text-[10px] uppercase italic shadow-md hover:bg-[#1fb355] transition-all">WhatsApp</a>
+                            <button onClick={() => (window as any).selectBusinessFromMap(b.id)} className="bg-black text-white py-3 rounded-2xl font-black text-[10px] uppercase italic shadow-md hover:bg-gray-800 transition-all">Ver Promos</button>
                           </div>
                         </div>
-                      ))}
-                    </div>
-                  )}
+                      </div>
+                    ))}
+                  </div>
                 </>
               ) : (
-                <div className="animate-fadeIn space-y-6">
-                  <button onClick={() => setSelectedBusinessId(null)} className="font-black text-[10px] uppercase italic text-orange-600">⬅ VOLVER AL LISTADO</button>
-                  <div className="bg-white rounded-[40px] shadow-2xl overflow-hidden flex flex-col md:flex-row">
-                    <div className="md:w-1/2 h-64 md:h-auto">
+                <div className="animate-fadeIn space-y-8">
+                  <button onClick={() => setSelectedBusinessId(null)} className="font-black text-[11px] uppercase italic text-orange-600 bg-orange-50 px-6 py-3 rounded-full hover:bg-orange-100 transition-all">⬅ Volver al Listado</button>
+                  <div className="bg-white rounded-[60px] shadow-2xl overflow-hidden flex flex-col md:flex-row border border-gray-100">
+                    <div className="md:w-1/2 h-80 md:h-auto overflow-hidden">
                        <img src={selectedBusiness?.imagenMenu || 'https://picsum.photos/800/600'} className="w-full h-full object-cover" />
                     </div>
-                    <div className="md:w-1/2 p-8 space-y-6">
-                      <h2 className="text-3xl font-black italic uppercase">{selectedBusiness?.nombre}</h2>
-                      <div className="space-y-3">
-                        <h5 className="text-[10px] font-black uppercase text-orange-600 tracking-widest">Cupones de Hoy</h5>
-                        {isSyncing && businessCoupons.length === 0 ? <p className="animate-pulse">Cargando ofertas...</p> : (
-                          businessCoupons.length === 0 ? <p className="text-gray-300 italic">No hay ofertas activas.</p> : businessCoupons.map(c => (
-                            <div key={c.id} className="bg-black text-white p-5 rounded-3xl flex items-center justify-between">
-                              <h4 className="text-sm font-black italic uppercase">{c.descripcionDescuento}</h4>
-                              {!activeCoupon || activeCoupon.id !== c.id ? (
-                                <button onClick={() => setActiveCoupon(c)} className="bg-orange-600 px-4 py-2 rounded-xl text-[9px] font-black uppercase">VER QR</button>
-                              ) : (
-                                <div className="bg-white p-1 rounded-lg"><QRCodeSVG value={c.codigoQR} size={40} /></div>
-                              )}
-                            </div>
-                          ))
-                        )}
+                    <div className="md:w-1/2 p-12 space-y-8 flex flex-col justify-center">
+                      <div>
+                        <h2 className="text-4xl font-black italic uppercase leading-none mb-2">{selectedBusiness?.nombre}</h2>
+                        <p className="text-sm font-bold text-gray-500">{selectedBusiness?.descripcion}</p>
+                      </div>
+                      <div className="space-y-4">
+                        <h5 className="text-[11px] font-black uppercase text-orange-600 tracking-[0.3em]">CUPONES Y OFERTAS</h5>
+                        {coupons.filter(c => c.idNegocio === selectedBusinessId).length === 0 ? <p className="text-gray-300 italic">No hay cupones disponibles en este momento.</p> : coupons.filter(c => c.idNegocio === selectedBusinessId).map(c => (
+                          <div key={c.id} className="bg-black text-white p-6 rounded-[35px] flex items-center justify-between shadow-xl border-l-8 border-orange-600 group">
+                            <h4 className="text-lg font-black italic uppercase group-hover:text-orange-500 transition-all">{c.descripcionDescuento}</h4>
+                            {!activeCoupon || activeCoupon.id !== c.id ? (
+                              <button onClick={() => setActiveCoupon(c)} className="bg-orange-600 px-6 py-3 rounded-2xl text-[10px] font-black uppercase hover:scale-105 transition-all shadow-lg">Obtener QR</button>
+                            ) : (
+                              <div className="bg-white p-2 rounded-xl animate-scaleIn"><QRCodeSVG value={c.codigoQR} size={60} /></div>
+                            )}
+                          </div>
+                        ))}
                       </div>
                     </div>
                   </div>
@@ -527,34 +596,58 @@ const App: React.FC = () => {
           )}
 
           {activeTab === 'registro' && (
-            <div className="max-w-xl mx-auto bg-white p-10 rounded-[40px] shadow-2xl">
-              <h2 className="text-2xl font-black italic uppercase mb-8">Registrar Aliado</h2>
-              <p className="text-[10px] text-gray-400 font-bold uppercase mb-6 italic">Completa el perfil comercial</p>
-              <form onSubmit={handleSaveBusiness} className="space-y-4">
-                 <input placeholder="Nombre Comercial" value={bizFormData.nombre} onChange={e => setBizFormData({...bizFormData, nombre: e.target.value})} className="form-input" required />
-                 <textarea placeholder="Descripción del producto" value={bizFormData.descripcion} onChange={e => setBizFormData({...bizFormData, descripcion: e.target.value})} className="form-input h-24" required />
-                 <button type="submit" className="w-full bg-black text-white py-4 rounded-2xl font-black uppercase italic shadow-xl">Guardar en Base de Datos</button>
+            <div className="max-w-2xl mx-auto bg-white p-12 rounded-[50px] shadow-2xl border border-gray-100">
+              <h2 className="text-3xl font-black italic uppercase mb-10 text-orange-600">Nuevo Aliado de la Calle</h2>
+              <form onSubmit={handleSaveBusiness} className="space-y-6">
+                 <label className="block">
+                    <span className="text-[11px] font-black uppercase text-gray-400 mb-2 block">Nombre del Local</span>
+                    <input value={bizFormData.nombre} onChange={e => setBizFormData({...bizFormData, nombre: e.target.value})} className="form-input" required />
+                 </label>
+                 <label className="block">
+                    <span className="text-[11px] font-black uppercase text-gray-400 mb-2 block">Categoría Comercial</span>
+                    <select value={bizFormData.categoria} onChange={e => setBizFormData({...bizFormData, categoria: e.target.value as BusinessCategory})} className="form-input">
+                      <option value="Hamburguesas">Hamburguesas</option>
+                      <option value="Perros Calientes">Perros Calientes</option>
+                      <option value="Pizzas">Pizzas</option>
+                      <option value="Arepas">Arepas</option>
+                      <option value="Tacos">Tacos</option>
+                      <option value="Postres">Postres</option>
+                      <option value="Otros">Otros</option>
+                    </select>
+                 </label>
+                 <label className="block">
+                    <span className="text-[11px] font-black uppercase text-gray-400 mb-2 block">Breve Descripción</span>
+                    <textarea value={bizFormData.descripcion} onChange={e => setBizFormData({...bizFormData, descripcion: e.target.value})} className="form-input h-24" required />
+                 </label>
+                 <button type="submit" className="w-full bg-black text-white py-5 rounded-[25px] font-black uppercase italic text-lg shadow-2xl hover:bg-orange-600 transition-all">Registrar en Plataforma 🍔</button>
+                 {saveStatus && <p className="text-center font-black uppercase text-orange-600 italic">{saveStatus}</p>}
               </form>
             </div>
           )}
         </div>
       </main>
 
-      <footer className="bg-black text-white p-8 text-center border-t-[8px] border-orange-600 mt-6">
-        <div className="text-[10px] font-black uppercase tracking-[0.3em] text-orange-500 italic">CALLE DEL HAMBRE - STABLE v2.5</div>
+      <footer className="bg-black text-white p-12 text-center border-t-[10px] border-orange-600 mt-10">
+        <div className="text-[11px] font-black uppercase tracking-[0.5em] text-orange-500 italic">CALLE DEL HAMBRE - ADMIN v3.5 INTEGRATED</div>
+        <p className="text-[9px] text-white/20 mt-4 uppercase font-bold">Ubicación Actual: {userLocation.lat.toFixed(4)}, {userLocation.lng.toFixed(4)}</p>
       </footer>
 
       <style dangerouslySetInnerHTML={{ __html: `
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes pushIn { from { opacity: 0; transform: translate(-50%, -20px); } to { opacity: 1; transform: translate(-50%, 0); } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes pushIn { from { opacity: 0; transform: translate(-50%, -30px); } to { opacity: 1; transform: translate(-50%, 0); } }
+        @keyframes scaleIn { from { transform: scale(0.5); opacity: 0; } to { transform: scale(1); opacity: 1; } }
         .animate-fadeIn { animation: fadeIn 0.4s ease-out forwards; }
-        .animate-pushIn { animation: pushIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
+        .animate-pushIn { animation: pushIn 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
+        .animate-scaleIn { animation: scaleIn 0.3s ease-out forwards; }
         .form-input { 
-          background-color: #F0F0F0 !important; padding: 12px 16px !important; border: 2px solid transparent !important; width: 100%; border-radius: 12px; font-weight: 700; outline: none; transition: all 0.2s; font-size: 13px; color: black;
+          background-color: #F8F8F8 !important; padding: 14px 20px !important; border: 2px solid transparent !important; width: 100%; border-radius: 18px; font-weight: 700; outline: none; transition: all 0.2s; font-size: 14px; color: black;
         }
-        .form-input:focus { border-color: #ea580c !important; background-color: #fff !important; }
+        .form-input:focus { border-color: #ea580c !important; background-color: #fff !important; box-shadow: 0 0 15px rgba(234, 88, 12, 0.1); }
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        .custom-biz-marker { background: none !important; border: none !important; }
+        .leaflet-popup-content-wrapper { border-radius: 25px !important; padding: 5px !important; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.2) !important; }
+        .leaflet-popup-tip { background: white !important; }
       `}} />
     </div>
   );
