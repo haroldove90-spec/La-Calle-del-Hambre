@@ -13,19 +13,22 @@ export interface Business {
   coordenadas: GeoPoint;
   imagenMenu: string;
   categoria: BusinessCategory;
+  telefono?: string;
+  hora_apertura?: string; // Formato HH:mm
+  hora_cierre?: string;   // Formato HH:mm
 }
 
 export interface Coupon {
   id: string;
   idNegocio: string;
   descripcionDescuento: string;
-  codigoQR: string; // URL o String codificado
-  fechaExpiracion: string; // ISO String
+  codigoQR: string; 
+  fechaExpiracion: string; 
 }
 
 export interface User {
   id: string;
-  historialCupones: string[]; // Array de IDs de cupones canjeados
+  historialCupones: string[];
   ultimaUbicacion: GeoPoint;
 }
 
